@@ -942,8 +942,9 @@ static void PollCameraInfo(ID3D11DeviceContext* imm)
             {
                 float rev = f[0];
                 if (!s_camValid || rev != s_camRev)
-                    LOGI("Camera info: reversedZ=%d near=%.4f far=%.1f P11=%.4f P00=%.4f (vFOV %.2f deg)", (int)rev, f[1],
-                         f[2], f[3], f[4], 2.0 * atan(1.0 / (fabs(f[3]) > 1e-6 ? fabs(f[3]) : 1.0)) * 57.29578);
+                    LOGI("Camera info: reversedZ=%d near=%.4f far=%.1f%s P11=%.4f P00=%.4f (vFOV %.2f deg)", (int)rev,
+                         f[1], f[2] < 1.0e30f ? f[2] : 0.0f, f[2] < 1.0e30f ? "" : " (infinite)", f[3], f[4],
+                         2.0 * atan(1.0 / (fabs(f[3]) > 1e-6 ? fabs(f[3]) : 1.0)) * 57.29578);
                 s_camRev = rev;
                 s_camNear = f[1];
                 float farZ = f[2];
@@ -1116,7 +1117,8 @@ static bool RunJob(ID3D11DeviceContext* imm, Job* job)
         if (InterlockedIncrement64(&s_jobFails) >= 3)
         {
             s_fatal = true;
-            LOGE("DLSS feature creation keeps failing - mod disabled");
+            LOGE("%s keeps failing - mod disabled",
+                 Backend() == UPSCALER_FSR ? "FSR context creation" : "DLSS feature creation");
         }
         goto swapback;
     }
@@ -1251,8 +1253,10 @@ out:
     ReleaseSRWLockExclusive(&s_viewLock);
     imm1->Release();
     if (ok)
+    {
         InterlockedIncrement64(&s_dlssFrames);
-        s_lastEvalQpc = NowQpc();
+        s_lastEvalQpc = NowQpc(); // the menu shows the upscaler as active only while evaluations succeed
+    }
     return ok;
 }
 

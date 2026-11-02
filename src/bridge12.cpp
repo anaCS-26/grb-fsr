@@ -175,7 +175,9 @@ static bool WaitFence(UINT64 v, DWORD ms)
     if (s_f12->GetCompletedValue() >= v)
         return true;
     s_f12->SetEventOnCompletion(v, s_event);
-    return WaitForSingleObject(s_event, ms) == WAIT_OBJECT_0 || s_f12->GetCompletedValue() >= v;
+    WaitForSingleObject(s_event, ms);
+    // the fence value decides: after a timed-out wait the event can still fire later, for an older value
+    return s_f12->GetCompletedValue() >= v;
 }
 
 ID3D12GraphicsCommandList* BridgeBegin(ID3D11DeviceContext* imm)

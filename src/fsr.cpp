@@ -18,7 +18,9 @@ static char s_active[32];
 static void FsrMessage(uint32_t type, const wchar_t* msg)
 {
     char a[1024];
-    WideCharToMultiByte(CP_UTF8, 0, msg ? msg : L"", -1, a, sizeof(a), nullptr, nullptr);
+    // a message longer than the buffer makes the conversion fail and leaves the buffer unterminated
+    if (!WideCharToMultiByte(CP_UTF8, 0, msg ? msg : L"", -1, a, sizeof(a), nullptr, nullptr))
+        lstrcpyA(a, "(message too long)");
     Log(type == FFX_API_MESSAGE_TYPE_ERROR ? LOG_ERR : LOG_INFO, "[FSR] %s", a);
 }
 
