@@ -2,6 +2,8 @@
 
 AMD FSR 4 upscaling for **Tom Clancy's Ghost Recon Breakpoint** (DirectX 11).
 
+**Download:** [Nexus Mods](https://www.nexusmods.com/ghostreconbreakpoint/mods/2243) or the [latest GitHub release](../../releases/latest).
+
 GRB-FSR is based on [GRB-DLSS](https://github.com/umairBinMohammad/grb-dlss) by Umair Bin Mohammad, which replaces the game's TAA ("Temporal Injection") pass with an upscaler fed by the game's own low-resolution colour, depth, motion vectors and jitter. This project adds what's needed to run FSR 4 on AMD GPUs.
 
 ## Status
@@ -20,7 +22,7 @@ GRB-FSR is based on [GRB-DLSS](https://github.com/umairBinMohammad/grb-dlss) by 
 
 ## Install
 
-1. Download `GRB-FSR-<version>.zip` from the [latest release](../../releases/latest) and copy everything in it (`dinput8.dll`, `GRB_FSR.ini`, AMD's `amd_fidelityfx_loader_dx12.dll` and `amd_fidelityfx_upscaler_dx12.dll`, and AMD's license) next to `GRB.exe`.
+1. Download `GRB-FSR-<version>.zip` from [Nexus Mods](https://www.nexusmods.com/ghostreconbreakpoint/mods/2243) or the [latest release](../../releases/latest) and copy everything in it (`dinput8.dll`, `GRB_FSR.ini`, AMD's `amd_fidelityfx_loader_dx12.dll` and `amd_fidelityfx_upscaler_dx12.dll`, and AMD's license) next to `GRB.exe`.
 2. Remove or rename OptiScaler (`winmm.dll`, `dxgi.dll`, ...) if it is installed.
 3. Start the game. The mod's menu (**Home**) shows `FSR 4.1.2` (or `3.1.x` on GPUs without FSR 4), and `GRB_FSR.log` shows `FSR context ... using 4.1.2`.
 
