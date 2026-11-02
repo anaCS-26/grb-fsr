@@ -1385,6 +1385,7 @@ float RenderScaleCurrent();
 static float s_renderScale = -1.0f; // runtime value (hotkeys); -1 = take from config
 static float s_cfgRenderScale = -1.0f;
 void OverlayToast(const char* text);
+void OverlayBeforeBackBufferCopy(ID3D11Resource* src);
 void OverlayInit();
 void OverlayHookDeviceFactory(ID3D11Device* dev);
 
@@ -2272,6 +2273,8 @@ static void STDMETHODCALLTYPE Hk_CopyResource(ID3D11DeviceContext* ctx, ID3D11Re
     VtHooks* h = HooksFor(ctx);
     if (s_watchCount && FindWatch(dst) >= 0)
         InterlockedIncrement64(&s_cbGpuCopies);
+    if (src && ctx == s_immCtx)
+        OverlayBeforeBackBufferCopy(src);
     ORIG(h, kCtx_CopyResource, PFN_CopyResource)(ctx, dst, src);
 }
 

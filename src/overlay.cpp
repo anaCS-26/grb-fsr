@@ -135,6 +135,10 @@ static volatile bool s_open;
 static HWND s_hwnd; // window of the swap chain the game presents with
 static uint64_t s_toastUntil;
 static char s_toast[96];
+// OptiScaler's DX11->DX12 frame generation copies the back buffer to its DX12 swap chain inside its own
+// Present wrapper, before the real DX11 Present we hook. The menu is then drawn when that copy starts.
+static IDXGISwapChain* volatile s_d3d11Sc; // last swap chain presented whose buffers are D3D11 textures
+static volatile bool s_drawnBeforeCopy;    // menu already drawn this frame by OverlayBeforeBackBufferCopy
 static int s_sel;
 static char s_edit[8];
 static int s_editLen; // >0 while typing a percentage
@@ -944,17 +948,63 @@ static void OnPresent(IDXGISwapChain* sc)
         DXGI_SWAP_CHAIN_DESC d;
         if (SUCCEEDED(sc->GetDesc(&d)) && d.OutputWindow)
         {
-            if (d.OutputWindow != s_hwnd)
+            // with frame generation two swap chains present every frame; log each window only once
+            static HWND logged[4];
+            bool seen = false;
+            for (HWND w : logged)
+                if (w == d.OutputWindow)
+                    seen = true;
+            if (!seen)
+            {
+                for (HWND& w : logged)
+                    if (!w)
+                    {
+                        w = d.OutputWindow;
+                        break;
+                    }
                 LOGI("Menu: game presents to window %p", d.OutputWindow);
+            }
             s_hwnd = d.OutputWindow;
             SubclassWindow(d.OutputWindow);
         }
         lastSc = sc;
+        ID3D11Device* d11 = nullptr;
+        if (SUCCEEDED(sc->GetDevice(__uuidof(ID3D11Device), (void**)&d11)) && d11)
+        {
+            s_d3d11Sc = sc;
+            d11->Release();
+        }
     }
     HandleInput(g_cfg.menuKey);
     bool toast = !s_open && s_toast[0] && NowQpc() < s_toastUntil;
+    if (s_drawnBeforeCopy && sc == s_d3d11Sc)
+    {
+        s_drawnBeforeCopy = false; // already in the frame that is actually shown
+        return;
+    }
     if (s_open || toast)
         Draw(sc, toast);
+}
+
+// Called from the mod's CopyResource hook (immediate context): if something copies the game's current
+// back buffer out (OptiScaler frame generation), draw the menu into it first so it reaches the screen.
+void OverlayBeforeBackBufferCopy(ID3D11Resource* src)
+{
+    bool toast = !s_open && s_toast[0] && NowQpc() < s_toastUntil;
+    if (!s_open && !toast)
+        return;
+    IDXGISwapChain* sc = s_d3d11Sc;
+    if (!sc || s_drawnBeforeCopy)
+        return;
+    ID3D11Texture2D* bb = nullptr;
+    if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb)) || !bb)
+        return;
+    bool match = (ID3D11Resource*)bb == src;
+    bb->Release();
+    if (!match)
+        return;
+    Draw(sc, toast);
+    s_drawnBeforeCopy = true;
 }
 
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Present)(IDXGISwapChain*, UINT, UINT);
