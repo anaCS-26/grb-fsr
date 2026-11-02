@@ -26,7 +26,10 @@ struct FsrInputs
     bool reset;
 };
 
-bool FsrLoad();                                                         // once; logs the FSR versions available
-void* FsrCreate(UINT renderW, UINT renderH, UINT outW, UINT outH, int flags); // nullptr on failure (logged)
+bool FsrLoad();                 // once; logs the FSR versions available
+bool FsrHasMajor(int major);    // the loader offers an FSR <major>.x on this GPU (after FsrLoad)
+const char* FsrActiveVersion(); // version of the last context created, "" when none
+// major = 0: the newest version the loader offers, else the newest <major>.x. nullptr on failure (logged)
+void* FsrCreate(UINT renderW, UINT renderH, UINT outW, UINT outH, int flags, int major);
 bool FsrDispatch(void* ctx, ID3D12GraphicsCommandList* cl, const FsrInputs& in);
 void FsrDestroy(void*& ctx); // the GPU must be done with the context (BridgeWaitIdle)

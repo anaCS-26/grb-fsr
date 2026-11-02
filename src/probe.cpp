@@ -1,5 +1,5 @@
 // Developer probe: locates the engine's render-resolution ratio in memory (used to implement RenderScale).
-// Driven by [Probe] keys in GRB_DLSS_cmd.ini (only with DevCommands=1).
+// Driven by [Probe] keys in GRB_FSR_cmd.ini (only with DevCommands=1).
 #include "common.h"
 
 static volatile float s_low[2], s_full[2], s_ratio[2], s_uvmax[2];

@@ -38,9 +38,12 @@ int main(int argc, char** argv)
 {
     int want = -1;
     const char* fsrDir = nullptr;
+    int fsrMajor = 0;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "fsr") && i + 1 < argc)
             fsrDir = argv[++i];
+        else if (!strcmp(argv[i], "ver") && i + 1 < argc)
+            fsrMajor = atoi(argv[++i]);
         else
             want = atoi(argv[i]);
     HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
@@ -79,7 +82,7 @@ int main(int argc, char** argv)
     if (!BridgeInit(dev))
         return 1;
 
-    const UINT lw = 640, lh = 360, fw = 960, fh = 540;
+    const UINT lw = 960, lh = 540, fw = 1920, fh = 1080; // the game at 1080p, 50% render scale
     const UINT rw = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
     ID3D12Resource *c12, *o12, *m12, *d12, *b12;
     ID3D11Texture2D* color = BridgeMakeTex(lw, lh, DXGI_FORMAT_R16G16B16A16_FLOAT, rw, &c12);
@@ -165,7 +168,7 @@ int main(int argc, char** argv)
         lstrcatW(g_modDir, L"\\");
     if (!FsrLoad())
         return 1;
-    void* ctx = FsrCreate(lw, lh, fw, fh, FSR_DEPTH_INVERTED);
+    void* ctx = FsrCreate(lw, lh, fw, fh, FSR_DEPTH_INVERTED, fsrMajor);
     if (!ctx)
         return 1;
     const float c = 0.5f;
@@ -241,8 +244,8 @@ int main(int argc, char** argv)
                 fsrBad++;
         }
     imm->Unmap(staging, 0);
-    printf("FSR: %d frames, %.3f ms per frame (steady state, incl. hand-off), output range %.4f..%.4f (want %.3f), %d bad samples\n",
-           fsrFrames, (double)(f1.QuadPart - f0.QuadPart) * 1000.0 / (double)qf.QuadPart / (fsrFrames - fsrFrames / 2), lo, hi, c, fsrBad);
+    printf("FSR %s: %d frames, %.3f ms per frame (steady state, incl. hand-off), output range %.4f..%.4f (want %.3f), %d bad samples\n",
+           FsrActiveVersion(), fsrFrames, (double)(f1.QuadPart - f0.QuadPart) * 1000.0 / (double)qf.QuadPart / (fsrFrames - fsrFrames / 2), lo, hi, c, fsrBad);
     BridgeWaitIdle();
     FsrDestroy(ctx);
     printf(fsrBad ? "FSR FAIL\n" : "FSR PASS\n");

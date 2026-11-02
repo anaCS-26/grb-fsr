@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds and runs the offline DX11 -> DX12 bridge test (Git Bash on Windows, same toolchain as build-win.sh,
-# plus MSYS2's mingw-w64 g++ for the CRT). Arguments: [adapter index] [fsr <folder with the FidelityFX DLLs>]
+# plus MSYS2's mingw-w64 g++ for the CRT). Arguments: [adapter index] [fsr <folder with the FidelityFX DLLs> [ver <major>]]
 set -e
 cd "$(dirname "$0")/.."
 SYS="${SYSROOT:-/c/msys64/mingw64}"

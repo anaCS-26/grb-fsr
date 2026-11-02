@@ -162,19 +162,27 @@ static float ReadScale(const wchar_t* ini)
 static int ReadUpscaler(const wchar_t* ini)
 {
     wchar_t buf[32];
-    GetPrivateProfileStringW(L"Upscaler", L"Backend", L"ngx", buf, 32, ini);
+    GetPrivateProfileStringW(L"Upscaler", L"Backend", L"fsr", buf, 32, ini);
     if (lstrcmpiW(buf, L"bridgetest") == 0)
         return UPSCALER_BRIDGE_TEST;
-    if (lstrcmpiW(buf, L"fsr") == 0)
-        return UPSCALER_FSR;
-    return UPSCALER_NGX;
+    if (lstrcmpiW(buf, L"ngx") == 0)
+        return UPSCALER_NGX;
+    return UPSCALER_FSR;
+}
+
+static int ReadFsrVersion(const wchar_t* ini)
+{
+    wchar_t buf[32];
+    GetPrivateProfileStringW(L"FSR", L"Version", L"auto", buf, 32, ini);
+    int v = buf[0] >= L'2' && buf[0] <= L'9' ? buf[0] - L'0' : 0; // "4", "3.1", ... -> major; "auto" -> 0
+    return v;
 }
 
 void LoadConfig()
 {
     wchar_t ini[MAX_PATH];
     lstrcpyW(ini, g_modDir);
-    lstrcatW(ini, L"GRB_DLSS.ini");
+    lstrcatW(ini, MOD_INI);
 
     g_cfg.enabled = ReadInt(ini, L"DLSS", L"Enabled", 1);
     g_cfg.upscaler = ReadUpscaler(ini);
@@ -191,7 +199,9 @@ void LoadConfig()
     g_cfg.renderScaleStep = ReadFloat(ini, L"DLSS", L"RenderScaleStep", 5.0f);
     if (g_cfg.renderScaleStep > 0.5f)
         g_cfg.renderScaleStep /= 100.0f;
-    g_cfg.sharpness = ReadFloat(ini, L"DLSS", L"Sharpness", 0.0f);
+    g_cfg.sharpness = ReadFloat(ini, L"FSR", L"Sharpness", ReadFloat(ini, L"DLSS", L"Sharpness", 0.0f));
+    g_cfg.sharpness = g_cfg.sharpness < 0.0f ? 0.0f : g_cfg.sharpness > 1.0f ? 1.0f : g_cfg.sharpness;
+    g_cfg.fsrVersion = ReadFsrVersion(ini);
     g_cfg.useBiasMask = ReadInt(ini, L"DLSS", L"UseResponsiveMask", 0);
     g_cfg.dilatedMV = ReadInt(ini, L"DLSS", L"DilatedMotionVectors", 1);
     g_cfg.autoExposure = ReadInt(ini, L"DLSS", L"AutoExposureHDR", 1);

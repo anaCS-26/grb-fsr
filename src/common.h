@@ -1,4 +1,4 @@
-// GRB DLSS - DLSS Super Resolution injection for Ghost Recon Breakpoint (DX11)
+// GRB-FSR - AMD FSR (and DLSS) upscaling for Ghost Recon Breakpoint (DX11), based on GRB-DLSS
 // Freestanding build (no static CRT): only Win32 + msvcrt.dll imports.
 #pragma once
 #define WIN32_LEAN_AND_MEAN
@@ -31,8 +31,11 @@ double fabs(double);
 double sqrt(double);
 }
 
-#define MOD_NAME "GRB-DLSS"
-#define MOD_VERSION "1.1.0"
+#define MOD_NAME "GRB-FSR"
+#define MOD_VERSION "0.1.0"
+#define MOD_INI L"GRB_FSR.ini"
+#define MOD_LOG L"GRB_FSR.log"
+#define MOD_CMD_INI L"GRB_FSR_cmd.ini"
 
 // ---------------------------------------------------------------- logging
 enum { LOG_ERR = 0, LOG_INFO = 1, LOG_DBG = 2, LOG_TRACE = 3 };
@@ -57,7 +60,7 @@ struct Config
     int logLevel;
     int ngxLogging;       // forward NGX's own log lines into our log
     int qualityOverride;  // -1 auto (from the game's resolution scale), else NVSDK_NGX_PerfQuality_Value
-    float sharpness;      // legacy DLSS sharpening (ignored by DLSS 2.5.1+)
+    float sharpness;      // FSR sharpening 0-1 (legacy DLSS sharpening, ignored by DLSS 2.5.1+)
     int debugView;        // 0 off, 1 motion vectors, 2 depth
     int hookDelayMs;
     int devCommands;
@@ -72,6 +75,7 @@ struct Config
     int dilatedMV;
     int fgCameraData;     // 1: feed the game's real camera matrices to Streamline frame generation        // 1: full-resolution depth-dilated motion vectors for DLSS / frame generation
     int upscaler;         // UPSCALER_* (read once: changing it needs a game restart)
+    int fsrVersion;       // 0 = newest FSR the loader offers, else a major version (4, 3, 2)
 };
 enum
 {

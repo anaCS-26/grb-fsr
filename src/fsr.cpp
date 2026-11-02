@@ -9,6 +9,11 @@ static PfnFfxDestroyContext s_destroy;
 static PfnFfxQuery s_query;
 static PfnFfxDispatch s_dispatch;
 static uint64_t s_dispatches;
+// upscaler versions the loader offers on this GPU, newest first
+static uint64_t s_verIds[16];
+static char s_verNames[16][32];
+static int s_verCount;
+static char s_active[32];
 
 static void FsrMessage(uint32_t type, const wchar_t* msg)
 {
@@ -59,24 +64,66 @@ bool FsrLoad()
     q.versionNames = names;
     if (count && s_query(nullptr, &q.header) == FFX_API_RETURN_OK)
         for (uint64_t i = 0; i < count; i++)
+        {
             LOGI("FSR: available upscaler %s", names[i] ? names[i] : "?");
+            s_verIds[s_verCount] = ids[i];
+            lstrcpynA(s_verNames[s_verCount], names[i] ? names[i] : "?", sizeof(s_verNames[0]));
+            s_verCount++;
+        }
     else
         LOGI("FSR: the loader reported no upscaler versions");
     s_state = 1;
     return true;
 }
 
-void* FsrCreate(UINT renderW, UINT renderH, UINT outW, UINT outH, int flags)
+// index of the newest offered version with this major number, or -1
+static int FindMajor(int major)
+{
+    for (int i = 0; i < s_verCount; i++)
+    {
+        int m = 0;
+        for (const char* p = s_verNames[i]; *p >= '0' && *p <= '9'; p++)
+            m = m * 10 + (*p - '0');
+        if (m == major)
+            return i;
+    }
+    return -1;
+}
+
+bool FsrHasMajor(int major)
+{
+    return FindMajor(major) >= 0;
+}
+
+const char* FsrActiveVersion()
+{
+    return s_active;
+}
+
+void* FsrCreate(UINT renderW, UINT renderH, UINT outW, UINT outH, int flags, int major)
 {
     if (s_state != 1)
         return nullptr;
     ffxCreateBackendDX12Desc be = {};
     be.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
     be.device = BridgeDevice();
+    // a forced major version; otherwise the loader takes the newest
+    ffxOverrideVersion ov = {};
+    ov.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
+    ov.header.pNext = &be.header;
+    ffxApiHeader* tail = &be.header;
+    int vi = major > 0 ? FindMajor(major) : -1;
+    if (vi >= 0)
+    {
+        ov.versionId = s_verIds[vi];
+        tail = &ov.header;
+    }
+    else if (major > 0)
+        LOGE("FSR: version %d requested but not offered on this GPU - using the newest", major);
     ffxCreateContextDescUpscaleVersion ver = {};
     ver.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE_VERSION;
     ver.version = FFX_UPSCALER_VERSION;
-    ver.header.pNext = &be.header;
+    ver.header.pNext = tail;
     ffxCreateContextDescUpscale cd = {};
     cd.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     cd.header.pNext = &ver.header;
@@ -96,7 +143,7 @@ void* FsrCreate(UINT renderW, UINT renderH, UINT outW, UINT outH, int flags)
     if (r != FFX_API_RETURN_OK)
     {
         // providers older than the version descriptor reject it
-        cd.header.pNext = &be.header;
+        cd.header.pNext = tail;
         ctx = nullptr;
         r = s_create(&ctx, &cd.header, nullptr);
     }
@@ -108,8 +155,9 @@ void* FsrCreate(UINT renderW, UINT renderH, UINT outW, UINT outH, int flags)
     ffxQueryGetProviderVersion pv = {};
     pv.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
     s_query(&ctx, &pv.header);
-    LOGI("FSR context %ux%u -> %ux%u flags 0x%X: using %s", renderW, renderH, outW, outH, cd.flags,
-         pv.versionName ? pv.versionName : "?");
+    lstrcpynA(s_active, pv.versionName ? pv.versionName : "?", sizeof(s_active));
+    LOGI("FSR context %ux%u -> %ux%u flags 0x%X: using %s (%s)", renderW, renderH, outW, outH, cd.flags, s_active,
+         vi >= 0 ? "forced in GRB_FSR.ini" : "newest available");
     return ctx;
 }
 
@@ -191,4 +239,5 @@ void FsrDestroy(void*& ctx)
     ffxReturnCode_t r = s_destroy(&c, nullptr);
     LOGI("FSR context destroyed (%u)", r);
     ctx = nullptr;
+    s_active[0] = 0;
 }

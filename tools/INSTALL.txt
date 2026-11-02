@@ -1,0 +1,25 @@
+GRB-FSR - AMD FSR upscaling for Ghost Recon Breakpoint (DirectX 11)
+https://github.com/anaCS-26/grb-fsr
+
+Install
+1. Copy every file in this zip into the game folder, next to GRB.exe
+   (Steam: right-click the game > Manage > Browse local files).
+2. If OptiScaler is installed, remove or rename its DLL (winmm.dll, dxgi.dll, ...).
+   GRB-FSR runs FSR itself and does not need it.
+3. Start the game in DirectX 11. In the graphics settings set Anti-Aliasing to TAA
+   (Temporal Injection on).
+4. Press Home in game for the menu: render resolution, FSR version, FSR sharpness, on/off.
+   End switches between FSR and the game's own TAA.
+
+The menu shows the FSR version in use (4.1.x on RX 6000 and newer with these DLLs).
+GRB_FSR.log, next to the game, records what the mod did; include it with bug reports.
+
+Uninstall
+Delete dinput8.dll (the other files do nothing without it).
+
+Files
+  dinput8.dll                        the mod
+  GRB_FSR.ini                        settings (also changed from the in-game menu)
+  amd_fidelityfx_loader_dx12.dll     AMD FidelityFX SDK 2.4, signed by AMD
+  amd_fidelityfx_upscaler_dx12.dll   AMD FidelityFX SDK 2.4 (FSR 4.1 / 3.1 / 2.3), signed by AMD
+  AMD-FidelityFX-license.md          AMD's license for the two DLLs above

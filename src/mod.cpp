@@ -416,6 +416,7 @@ struct View
     // D3D12 side of the textures above (DX12 bridge backends only)
     ID3D12Resource *r12Color, *r12MV, *r12Depth, *r12Bias, *r12Out, *r12MVHi;
     void* fsrCtx;
+    int fsrMajor; // [FSR] Version the context was created with
     uint64_t evalCount;
     uint64_t lastQpc;
 };
@@ -636,8 +637,27 @@ static int s_backend = -1;
 static int Backend()
 {
     if (s_backend < 0)
-        s_backend = g_cfg.upscaler;
+    {
+        int b = g_cfg.upscaler;
+        if (b == UPSCALER_FSR)
+        {
+            wchar_t p[MAX_PATH];
+            lstrcpyW(p, g_modDir);
+            lstrcatW(p, L"amd_fidelityfx_loader_dx12.dll");
+            if (GetFileAttributesW(p) == INVALID_FILE_ATTRIBUTES)
+            {
+                LOGE("Backend=fsr but amd_fidelityfx_loader_dx12.dll is not next to the mod: using the NGX path "
+                     "(DLSS, or OptiScaler) instead");
+                b = UPSCALER_NGX;
+            }
+        }
+        s_backend = b;
+    }
     return s_backend;
+}
+int ModBackend()
+{
+    return Backend();
 }
 static bool UsesBridge() { return Backend() == UPSCALER_BRIDGE_TEST || Backend() == UPSCALER_FSR; }
 
@@ -1079,8 +1099,19 @@ static bool RunJob(ID3D11DeviceContext* imm, Job* job)
     }
     SaveCs(imm, s_csSave);
 
-    if (Backend() == UPSCALER_FSR ? !v->fsrCtx && !(v->fsrCtx = FsrCreate(v->lowW, v->lowH, v->fullW, v->fullH, FsrFlags(*v)))
-                                  : !UsesBridge() && !v->feature && !CreateFeature(imm, *v))
+    if (Backend() == UPSCALER_FSR && v->fsrCtx && v->fsrMajor != g_cfg.fsrVersion)
+    {
+        // [FSR] Version changed in the menu or the ini: rebuild the context
+        BridgeWaitIdle();
+        FsrDestroy(v->fsrCtx);
+        v->reset = true;
+    }
+    if (Backend() == UPSCALER_FSR && !v->fsrCtx)
+    {
+        v->fsrMajor = g_cfg.fsrVersion;
+        v->fsrCtx = FsrCreate(v->lowW, v->lowH, v->fullW, v->fullH, FsrFlags(*v), v->fsrMajor);
+    }
+    if (Backend() == UPSCALER_FSR ? !v->fsrCtx : !UsesBridge() && !v->feature && !CreateFeature(imm, *v))
     {
         if (InterlockedIncrement64(&s_jobFails) >= 3)
         {
@@ -1470,7 +1501,7 @@ static void RecordResolveDraw(ID3D11DeviceContext* ctx, VtHooks* h, ID3D11PixelS
 
 
 // ------------------------------------------------------------------ live tuning (developer aid)
-// When [Log] DevCommands=1, GRB_DLSS_cmd.ini is re-read whenever it changes, so settings can be
+// When [Log] DevCommands=1, GRB_FSR_cmd.ini is re-read whenever it changes, so settings can be
 // switched without keyboard input.
 void RenderScaleApply(float scale);
 float RenderScaleGameRatio();
@@ -1502,7 +1533,7 @@ void ModSetDlssOn(bool on)
     s_userEnabled = on;
     for (View& v : s_views)
         v.reset = true;
-    LOGI("Menu: DLSS %s", on ? "ON" : "OFF (game TAA)");
+    LOGI("Menu: upscaler %s", on ? "ON" : "OFF (game TAA)");
 }
 void ModGetStatus(UINT* lowW, UINT* lowH, UINT* fullW, UINT* fullH, bool* active, bool* seen)
 {
@@ -1523,11 +1554,11 @@ void ProbePoll(const wchar_t* ini);
 static FILETIME s_cmdTime, s_iniTime;
 static void PollCommands()
 {
-    // GRB_DLSS.ini is re-read whenever it is saved: presets/quality apply without restarting the game
+    // GRB_FSR.ini is re-read whenever it is saved: presets/quality apply without restarting the game
     {
         wchar_t ip[MAX_PATH];
         lstrcpyW(ip, g_modDir);
-        lstrcatW(ip, L"GRB_DLSS.ini");
+        lstrcatW(ip, MOD_INI);
         WIN32_FILE_ATTRIBUTE_DATA ia;
         if (GetFileAttributesExW(ip, GetFileExInfoStandard, &ia))
         {
@@ -1537,8 +1568,9 @@ static void PollCommands()
             {
                 s_iniTime = ia.ftLastWriteTime;
                 LoadConfig();
-                LOGI("GRB_DLSS.ini reloaded: Enabled=%d Preset=%d QualityMode=%d RenderScale=%.3f", g_cfg.enabled,
-                     g_cfg.preset, g_cfg.qualityOverride, g_cfg.renderScale);
+                LOGI("GRB_FSR.ini reloaded: Enabled=%d Preset=%d QualityMode=%d RenderScale=%.3f FSR Version=%d "
+                     "Sharpness=%.2f", g_cfg.enabled, g_cfg.preset, g_cfg.qualityOverride, g_cfg.renderScale,
+                     g_cfg.fsrVersion, g_cfg.sharpness);
                 s_cfgRenderScale = -2.0f; // re-apply the file's RenderScale
             }
         }
@@ -1547,7 +1579,7 @@ static void PollCommands()
         return;
     wchar_t p[MAX_PATH];
     lstrcpyW(p, g_modDir);
-    lstrcatW(p, L"GRB_DLSS_cmd.ini");
+    lstrcatW(p, MOD_CMD_INI);
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (!GetFileAttributesExW(p, GetFileExInfoStandard, &fa))
         return;
@@ -1605,7 +1637,8 @@ static bool HandleTaa(ID3D11DeviceContext* ctx, VtHooks* h, CtxInfo* ce, ID3D11P
     if (g_cfg.toggleKey && (GetAsyncKeyState(g_cfg.toggleKey) & 1))
     {
         s_userEnabled = !s_userEnabled;
-        LOGI("Toggle: DLSS %s", s_userEnabled ? "ON" : "OFF (game TAA)");
+        LOGI("Toggle: upscaler %s", s_userEnabled ? "ON" : "OFF (game TAA)");
+        OverlayToast(s_userEnabled ? (Backend() == UPSCALER_FSR ? "FSR on" : "DLSS on") : "Upscaler off (game TAA)");
         for (View& v : s_views)
             v.reset = true;
     }
@@ -1620,7 +1653,7 @@ static bool HandleTaa(ID3D11DeviceContext* ctx, VtHooks* h, CtxInfo* ce, ID3D11P
         LOGI("Preset key: DLSS preset now %s", g_cfg.preset ? (const char[][2]){"J", "K", "L", "M"}[g_cfg.preset - 10] : "default");
     }
     // custom internal render resolution
-    if (g_cfg.renderScale != s_cfgRenderScale) // startup or GRB_DLSS.ini edited
+    if (g_cfg.renderScale != s_cfgRenderScale) // startup or GRB_FSR.ini edited
     {
         s_cfgRenderScale = g_cfg.renderScale;
         s_renderScale = g_cfg.renderScale;

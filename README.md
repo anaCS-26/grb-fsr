@@ -6,10 +6,11 @@ GRB-FSR is based on [GRB-DLSS](https://github.com/umairBinMohammad/grb-dlss) by 
 
 ## Status
 
-**Work in progress. There is no release yet.**
+**Early testing (0.1.0).**
 
-- **Working now:** the mod runs on AMD GPUs. Upstream GRB-DLSS can't: its context hooks are lost there (see [AMD fix](#amd-fix)). Paired with [OptiScaler](https://github.com/optiscaler/OptiScaler), the mod's DLSS calls become FSR 4. Tested on a Radeon RX 6700S, where OptiScaler uses the driver's FSR 4.1.2 RDNA 2 model.
-- **In testing:** a built-in FSR backend (`Backend=fsr`), no OptiScaler needed. The mod runs AMD's FidelityFX API ([SDK 2.4](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK)) on its own DX11→DX12 bridge (`src/bridge12.cpp`, `src/fsr.cpp`), and gives FSR the game's real camera near/far/FOV. The offline test (`tools/bridge_test.sh`) passes on an RX 6700S with FSR 4.1.2. It has not been tested in-game yet.
+- **Built-in FSR (default):** the mod runs AMD's FidelityFX API ([SDK 2.4](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK)) itself, on its own DX11→DX12 bridge (`src/bridge12.cpp`, `src/fsr.cpp`). No OptiScaler needed. FSR gets the game's real camera near/far/FOV. Tested in-game on a Radeon RX 6700S with FSR 4.1.2: sharp image, no errors over a full session.
+- The menu (Home) picks the FSR version (newest, or FSR 4 / 3 / 2) and FSR sharpness. On the RX 6700S at 1080p with a 50% render scale, FSR 4.1.2 costs about 2.2 ms per frame and FSR 3.1.6 about 1 ms (`tools/bridge_test.sh`).
+- The mod also runs on AMD GPUs through upstream's NGX path. Upstream GRB-DLSS can't: its context hooks are lost there (see [AMD fix](#amd-fix)). Paired with [OptiScaler](https://github.com/optiscaler/OptiScaler) (`Backend=ngx`), the mod's DLSS calls become FSR 4.
 
 ## Requirements
 
@@ -17,16 +18,19 @@ GRB-FSR is based on [GRB-DLSS](https://github.com/umairBinMohammad/grb-dlss) by 
 - Ghost Recon Breakpoint on **DirectX 11** (`GRB.exe`, not Vulkan). In Steam, choose the DX11 entry when you press Play.
 - In the game's video settings: **Anti-Aliasing on, Temporal Injection on**. The mod hooks the TAA pass, so it does nothing without TAA.
 
-## Install (built-in FSR, in testing)
+## Install
 
-1. Build `dinput8.dll` (see [Build](#build)) and copy it and `config/GRB_DLSS.ini` next to `GRB.exe`.
-2. From the FidelityFX SDK 2.4 (`Kits/FidelityFX/signedbin/`), copy `amd_fidelityfx_loader_dx12.dll` and `amd_fidelityfx_upscaler_dx12.dll` to the same folder. These are AMD's signed DLLs; see AMD's license in [`third_party/ffx/license.md`](third_party/ffx/license.md).
-3. In `GRB_DLSS.ini`, set `Backend=fsr` under `[Upscaler]`. Remove or rename OptiScaler (`winmm.dll`, `dxgi.dll`, ...) if it is installed.
-4. `GRB_DLSS.log` should show `FSR context ... using 4.1.2` (or `3.1.x` on GPUs without FSR 4).
+1. Copy everything in the release zip (`dinput8.dll`, `GRB_FSR.ini`, AMD's `amd_fidelityfx_loader_dx12.dll` and `amd_fidelityfx_upscaler_dx12.dll`, and AMD's license) next to `GRB.exe`.
+2. Remove or rename OptiScaler (`winmm.dll`, `dxgi.dll`, ...) if it is installed.
+3. Start the game. The mod's menu (**Home**) shows `FSR 4.1.2` (or `3.1.x` on GPUs without FSR 4), and `GRB_FSR.log` shows `FSR context ... using 4.1.2`.
+
+To build the zip yourself: build `dinput8.dll` (see [Build](#build)), then run `tools/package.sh <FidelityFX SDK 2.4 Kits/FidelityFX/signedbin folder>`. The two AMD DLLs are AMD's signed binaries, redistributed under AMD's license in [`third_party/ffx/license.md`](third_party/ffx/license.md).
+
+Upgrading from GRB-DLSS or an earlier GRB-FSR build: the settings file is now `GRB_FSR.ini` (and the log `GRB_FSR.log`). The old `GRB_DLSS.ini` is no longer read.
 
 ## Install (with OptiScaler)
 
-1. Build `dinput8.dll` (see [Build](#build)) and copy it and `config/GRB_DLSS.ini` next to `GRB.exe`.
+1. Copy `dinput8.dll` and `GRB_FSR.ini` next to `GRB.exe`, and set `Backend=ngx` under `[Upscaler]` in `GRB_FSR.ini`.
 2. Install OptiScaler as `winmm.dll` in the same folder. Tested with 0.9.4 and with the v10 nightly of 2026-11-01.
 3. In `OptiScaler.ini`, set:
    - **0.9.4:** `Dx11Upscaler=fsr31_12`, `UpscalerIndex=0`, `Fsr4ForceEnableInt8=true`
@@ -34,7 +38,7 @@ GRB-FSR is based on [GRB-DLSS](https://github.com/umairBinMohammad/grb-dlss) by 
    - **Both:** `Dxgi=false` (no GPU spoofing needed), and `Fsr4EnableWatermark=true` while you check that it works.
 4. Start the game. The FSR watermark should read `FSR4…` (on RX 6000: `FSR4-i8-2 … Source: Driver`), not `FSR3`. NVIDIA's `nvngx_dlss.dll` is **not** needed.
 
-In game: **Home** opens the mod's menu (render scale), **End** switches between the upscaler and the game's TAA, **Page Up/Down** change the render scale. On laptops without these keys they are usually Fn + arrow keys. OptiScaler's own menu defaults to **Insert**; set `ShortcutKey` in `OptiScaler.ini` if your keyboard has none.
+In game: **Home** opens the mod's menu (render scale, FSR version and sharpness), **End** switches between the upscaler and the game's TAA, **Page Up/Down** change the render scale. On laptops without these keys they are usually Fn + arrow keys. OptiScaler's own menu defaults to **Insert**; set `ShortcutKey` in `OptiScaler.ini` if your keyboard has none.
 
 > Breakpoint is an always-online game. The mod only touches rendering, but use it at your own risk, especially in PvP (Ghost War).
 
@@ -50,7 +54,7 @@ Cross-build from Linux with `build.sh` (clang, lld, mingw-w64 headers). Or build
 
 ## Configuration
 
-See [`config/GRB_DLSS.ini`](config/GRB_DLSS.ini). Every key is documented inline. Most changes apply in-game when the file is saved.
+See [`config/GRB_FSR.ini`](config/GRB_FSR.ini). Every key is documented inline. Most changes apply in-game when the file is saved.
 
 ## Credits
 

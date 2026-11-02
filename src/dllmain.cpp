@@ -89,7 +89,7 @@ extern "C" BOOL WINAPI DllMainCRTStartup(HINSTANCE hinst, DWORD reason, LPVOID)
         LoadConfig();
         wchar_t logp[MAX_PATH];
         lstrcpyW(logp, g_modDir);
-        lstrcatW(logp, L"GRB_DLSS.log");
+        lstrcatW(logp, MOD_LOG);
         LogInit(logp);
 
         wchar_t exe[MAX_PATH];
@@ -110,7 +110,7 @@ extern "C" BOOL WINAPI DllMainCRTStartup(HINSTANCE hinst, DWORD reason, LPVOID)
                 CloseHandle(t);
         }
         else
-            LOGI("Disabled in GRB_DLSS.ini");
+            LOGI("Disabled in GRB_FSR.ini");
     }
     return TRUE;
 }

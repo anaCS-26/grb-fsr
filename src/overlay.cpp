@@ -1,8 +1,10 @@
-// In-game settings menu (Home key by default): render resolution in exact percent, DLSS preset, DLSS on/off.
+// In-game settings menu (Home key by default): render resolution in exact percent, FSR version and sharpness
+// (or the DLSS preset on the NGX path), upscaler on/off.
 // Drawn with D3D11 into the game's back buffer from a hook on the swap chain the game presents with
 // (captured at creation, so it is OptiScaler's wrapper when OptiScaler is installed).
 #include "common.h"
 #include "font.h"
+#include "fsr.h"
 #include <dxgi1_2.h>
 
 // ---------------------------------------------------------------- mod.cpp / renderscale.cpp API
@@ -12,6 +14,7 @@ bool ModGetDlssOn();
 void ModSetDlssOn(bool on);
 void ModGetStatus(UINT* lowW, UINT* lowH, UINT* fullW, UINT* fullH, bool* dlssActive, bool* taaSeen);
 void ModSetOverlayThread(bool on);
+int ModBackend();
 float RenderScaleGameRatio();
 bool ChainExport(HMODULE mod, const char* name, void* hook, void** orig);
 
@@ -340,16 +343,38 @@ enum
 {
     kItemScale,
     kItemPreset,
+    kItemFsrVersion,
+    kItemSharpness,
     kItemDlss,
     kItemSave,
-    kItemCount
 };
+static bool IsFsr()
+{
+    return ModBackend() == UPSCALER_FSR;
+}
+// the menu's items for the active backend, top to bottom
+static int MenuItems(int* out)
+{
+    int n = 0;
+    out[n++] = kItemScale;
+    if (IsFsr())
+    {
+        out[n++] = kItemFsrVersion;
+        out[n++] = kItemSharpness;
+    }
+    else
+        out[n++] = kItemPreset;
+    out[n++] = kItemDlss;
+    out[n++] = kItemSave;
+    return n;
+}
+static int s_hiRow; // grid row of the selected item, for the highlight
 
 static void SaveIni()
 {
     wchar_t ini[MAX_PATH], v[32];
     lstrcpyW(ini, g_modDir);
-    lstrcatW(ini, L"GRB_DLSS.ini");
+    lstrcatW(ini, MOD_INI);
     float s = ModGetRenderScale();
     if (s > 0.0f)
         wsprintfW(v, L"%d", (int)(s * 100.0f + 0.5f));
@@ -365,8 +390,20 @@ static void SaveIni()
     else
         lstrcpyW(v, L"0");
     WritePrivateProfileStringW(L"DLSS", L"Preset", v, ini);
+    if (IsFsr())
+    {
+        if (g_cfg.fsrVersion > 0)
+            wsprintfW(v, L"%d", g_cfg.fsrVersion);
+        else
+            lstrcpyW(v, L"auto");
+        WritePrivateProfileStringW(L"FSR", L"Version", v, ini);
+        int c = (int)(g_cfg.sharpness * 100.0f + 0.5f);
+        wsprintfW(v, L"%d.%02d", c / 100, c % 100);
+        WritePrivateProfileStringW(L"FSR", L"Sharpness", v, ini);
+    }
     s_dirty = false;
-    LOGI("Menu: settings saved to GRB_DLSS.ini (RenderScale=%d%%, Preset=%s)", (int)(s * 100.0f + 0.5f), PresetName(p));
+    LOGI("Menu: settings saved to GRB_FSR.ini (RenderScale=%d%%, Preset=%s, FSR Version=%d, Sharpness=%.2f)",
+         (int)(s * 100.0f + 0.5f), PresetName(p), g_cfg.fsrVersion, g_cfg.sharpness);
 }
 
 static void SetScalePercent(int pct)
@@ -422,14 +459,17 @@ static void HandleInput(int menuKey)
         }
         return;
     }
+    int items[8], nItems = MenuItems(items);
+    if (s_sel >= nItems)
+        s_sel = 0;
     if (Pressed(VK_UP, true))
     {
-        s_sel = (s_sel + kItemCount - 1) % kItemCount;
+        s_sel = (s_sel + nItems - 1) % nItems;
         s_editLen = 0;
     }
     if (Pressed(VK_DOWN, true))
     {
-        s_sel = (s_sel + 1) % kItemCount;
+        s_sel = (s_sel + 1) % nItems;
         s_editLen = 0;
     }
     int dir = 0;
@@ -445,7 +485,7 @@ static void HandleInput(int menuKey)
         hit = Pressed(VK_NUMPAD0 + d) || hit;
         if (hit && s_editLen < 3)
         {
-            s_sel = kItemScale;
+            s_sel = 0; // render resolution
             s_edit[s_editLen++] = (char)('0' + d);
             s_edit[s_editLen] = 0;
         }
@@ -454,7 +494,7 @@ static void HandleInput(int menuKey)
     {
         if (s_editLen)
             s_edit[--s_editLen] = 0;
-        else if (s_sel == kItemScale)
+        else if (items[s_sel] == kItemScale)
         {
             ModSetRenderScale(0.0f); // back to the game's own resolution
             s_dirty = true;
@@ -469,7 +509,7 @@ static void HandleInput(int menuKey)
         SetScalePercent(v);
         return;
     }
-    switch (s_sel)
+    switch (items[s_sel])
     {
     case kItemScale:
         if (dir)
@@ -488,6 +528,33 @@ static void HandleInput(int menuKey)
                     idx = i;
             idx = (idx + dir + kNumPresets) % kNumPresets;
             g_cfg.preset = kPresets[idx];
+            s_dirty = true;
+        }
+        break;
+    case kItemFsrVersion:
+        if (dir)
+        {
+            static const int kVers[] = {0, 4, 3, 2}; // newest, then each major the loader offers
+            int idx = 0;
+            for (int i = 0; i < 4; i++)
+                if (kVers[i] == g_cfg.fsrVersion)
+                    idx = i;
+            for (int k = 0; k < 4; k++)
+            {
+                idx = (idx + dir + 4) % 4;
+                if (!kVers[idx] || FsrHasMajor(kVers[idx]))
+                    break;
+            }
+            g_cfg.fsrVersion = kVers[idx];
+            s_dirty = true;
+        }
+        break;
+    case kItemSharpness:
+        if (dir)
+        {
+            float v = g_cfg.sharpness + dir * (shift ? 0.2f : 0.05f);
+            v = (float)floor(v * 20.0f + 0.5f) / 20.0f;
+            g_cfg.sharpness = v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
             s_dirty = true;
         }
         break;
@@ -538,8 +605,15 @@ static void BuildMenu()
     bool active = false, seen = false;
     ModGetStatus(&lw, &lh, &fw, &fh, &active, &seen);
 
-    Put(0, 1, "GRB-DLSS " MOD_VERSION, cCyan);
-    if (active)
+    bool fsr = IsFsr();
+    int items[8], nItems = MenuItems(items);
+    if (s_sel >= nItems)
+        s_sel = 0;
+    Put(0, 1, MOD_NAME " " MOD_VERSION, cCyan);
+    if (active && fsr)
+        _snprintf(b, sizeof(b), "FSR %s  %ux%u -> %ux%u", FsrActiveVersion()[0] ? FsrActiveVersion() : "?", lw, lh,
+                  fw, fh);
+    else if (active)
         _snprintf(b, sizeof(b), "DLSS active  %ux%u -> %ux%u", lw, lh, fw, fh);
     else if (seen)
         _snprintf(b, sizeof(b), "Game TAA  %ux%u -> %ux%u", lw, lh, fw, fh);
@@ -552,7 +626,9 @@ static void BuildMenu()
     int row = 2;
     // render resolution
     {
-        bool sel = s_sel == kItemScale;
+        bool sel = items[s_sel] == kItemScale;
+        if (sel)
+            s_hiRow = row;
         Put(row, 1, sel ? ">" : " ", cYellow);
         Put(row, 3, "Render resolution", cWhite);
         if (s_editLen)
@@ -571,25 +647,44 @@ static void BuildMenu()
         Put(row, 24, b, cGray);
         row++;
     }
+    for (int i = 1; i < nItems; i++)
     {
-        bool sel = s_sel == kItemPreset;
+        bool sel = i == s_sel;
+        if (sel)
+            s_hiRow = row;
         Put(row, 1, sel ? ">" : " ", cYellow);
-        Put(row, 3, "DLSS preset", cWhite);
-        _snprintf(b, sizeof(b), "< %s >", PresetName(g_cfg.preset));
-        Put(row, 24, b, sel ? cYellow : cWhite);
-        row++;
-    }
-    {
-        bool sel = s_sel == kItemDlss;
-        Put(row, 1, sel ? ">" : " ", cYellow);
-        Put(row, 3, "DLSS", cWhite);
-        Put(row, 24, ModGetDlssOn() ? "< on >" : "< off (game TAA) >", sel ? cYellow : cWhite);
-        row++;
-    }
-    {
-        bool sel = s_sel == kItemSave;
-        Put(row, 1, sel ? ">" : " ", cYellow);
-        Put(row, 3, s_dirty ? "Save to GRB_DLSS.ini (Enter)  *unsaved*" : "Save to GRB_DLSS.ini (Enter)", sel ? cYellow : cWhite);
+        int col = sel ? cYellow : cWhite;
+        switch (items[i])
+        {
+        case kItemPreset:
+            Put(row, 3, "DLSS preset", cWhite);
+            _snprintf(b, sizeof(b), "< %s >", PresetName(g_cfg.preset));
+            Put(row, 24, b, col);
+            break;
+        case kItemFsrVersion:
+            Put(row, 3, "FSR version", cWhite);
+            if (g_cfg.fsrVersion > 0)
+                _snprintf(b, sizeof(b), "< FSR %d >", g_cfg.fsrVersion);
+            else
+                _snprintf(b, sizeof(b), "< newest >");
+            Put(row, 24, b, col);
+            break;
+        case kItemSharpness:
+            Put(row, 3, "FSR sharpness", cWhite);
+            if (g_cfg.sharpness > 0.0f)
+                _snprintf(b, sizeof(b), "< %d %% >", (int)(g_cfg.sharpness * 100.0f + 0.5f));
+            else
+                _snprintf(b, sizeof(b), "< off >");
+            Put(row, 24, b, col);
+            break;
+        case kItemDlss:
+            Put(row, 3, fsr ? "FSR" : "DLSS", cWhite);
+            Put(row, 24, ModGetDlssOn() ? "< on >" : "< off (game TAA) >", col);
+            break;
+        case kItemSave:
+            Put(row, 3, s_dirty ? "Save to GRB_FSR.ini (Enter)  *unsaved*" : "Save to GRB_FSR.ini (Enter)", col);
+            break;
+        }
         row++;
     }
     row++;
@@ -672,7 +767,7 @@ static bool InitRender(ID3D11Device* dev)
     if (!compile)
         return false;
     ID3DBlob *vsb = nullptr, *psb = nullptr, *err = nullptr;
-    HRESULT hr = compile(kOverlayHlsl, sizeof(kOverlayHlsl) - 1, "GRB_DLSS_Menu", nullptr, nullptr, "vsmain", "vs_5_0", 0, 0, &vsb, &err);
+    HRESULT hr = compile(kOverlayHlsl, sizeof(kOverlayHlsl) - 1, "GRB_FSR_Menu", nullptr, nullptr, "vsmain", "vs_5_0", 0, 0, &vsb, &err);
     if (FAILED(hr))
     {
         LOGE("Menu VS compile failed: %s", err ? (const char*)err->GetBufferPointer() : "?");
@@ -680,7 +775,7 @@ static bool InitRender(ID3D11Device* dev)
         return false;
     }
     SafeRelease(err);
-    hr = compile(kOverlayHlsl, sizeof(kOverlayHlsl) - 1, "GRB_DLSS_Menu", nullptr, nullptr, "psmain", "ps_5_0", 0, 0, &psb, &err);
+    hr = compile(kOverlayHlsl, sizeof(kOverlayHlsl) - 1, "GRB_FSR_Menu", nullptr, nullptr, "psmain", "ps_5_0", 0, 0, &psb, &err);
     if (FAILED(hr))
     {
         LOGE("Menu PS compile failed: %s", err ? (const char*)err->GetBufferPointer() : "?");
@@ -896,8 +991,7 @@ static void Draw(IDXGISwapChain* sc, bool toast)
         if (!toast)
         {
             // highlight the selected row (render-resolution item spans two rows: highlight the first)
-            int hiRow = s_sel == kItemScale ? 2 : s_sel == kItemPreset ? 4 : s_sel == kItemDlss ? 5 : 6;
-            cbd.hi = (float)hiRow;
+            cbd.hi = (float)s_hiRow;
         }
         ModSetOverlayThread(true);
         SavedState st;
