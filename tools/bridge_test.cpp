@@ -2,7 +2,10 @@
 // Creates a D3D11 device on the discrete GPU (or the adapter given as argument 1), the same shared textures
 // the mod uses, then for many frames: D3D11 writes a new colour, D3D12 upscales it, D3D11 reads the output
 // back. A stale or wrong value means the sharing or the fence hand-off is broken.
+// With "fsr <dir>" it then runs FSR (src/fsr.cpp) through the bridge, loading the FidelityFX DLLs from <dir>,
+// on a flat-colour frame, and checks the output converges to that colour.
 #include "../src/bridge12.h"
+#include "../src/fsr.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -33,7 +36,13 @@ typedef HRESULT(WINAPI* PFN_CreateFactory1)(REFIID, void**);
 
 int main(int argc, char** argv)
 {
-    int want = argc > 1 ? atoi(argv[1]) : -1;
+    int want = -1;
+    const char* fsrDir = nullptr;
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "fsr") && i + 1 < argc)
+            fsrDir = argv[++i];
+        else
+            want = atoi(argv[i]);
     HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
     PFN_CreateFactory1 cf = (PFN_CreateFactory1)GetProcAddress(dxgi, "CreateDXGIFactory1");
     IDXGIFactory1* fac = nullptr;
@@ -145,6 +154,97 @@ int main(int argc, char** argv)
     printf("%d frames, %d with wrong output, %.3f ms per frame (upload + bridge + readback)\n", frames, bad,
            (double)(f1.QuadPart - f0.QuadPart) * 1000.0 / (double)qf.QuadPart / frames);
     BridgeWaitIdle();
-    printf(bad ? "FAIL\n" : "PASS\n");
-    return bad ? 1 : 0;
+    printf(bad ? "bridge FAIL\n" : "bridge PASS\n");
+    if (bad || !fsrDir)
+        return bad ? 1 : 0;
+
+    // ---- FSR on the bridge
+    MultiByteToWideChar(CP_UTF8, 0, fsrDir, -1, g_modDir, MAX_PATH);
+    size_t n = wcslen(g_modDir);
+    if (n && g_modDir[n - 1] != L'\\' && g_modDir[n - 1] != L'/')
+        lstrcatW(g_modDir, L"\\");
+    if (!FsrLoad())
+        return 1;
+    void* ctx = FsrCreate(lw, lh, fw, fh, FSR_DEPTH_INVERTED);
+    if (!ctx)
+        return 1;
+    const float c = 0.5f;
+    uint16_t hc = Half(c), one = Half(1.0f);
+    for (UINT i = 0; i < lw * lh; i++)
+    {
+        px[i * 4 + 0] = hc;
+        px[i * 4 + 1] = hc;
+        px[i * 4 + 2] = hc;
+        px[i * 4 + 3] = one;
+    }
+    imm->UpdateSubresource(color, 0, nullptr, px, lw * 8, 0);
+    float* dz = (float*)malloc(lw * lh * 4);
+    for (UINT i = 0; i < lw * lh; i++)
+        dz[i] = 0.01f;
+    imm->UpdateSubresource(depth, 0, nullptr, dz, lw * 4, 0);
+    memset(px, 0, lw * lh * 4);
+    imm->UpdateSubresource(mv, 0, nullptr, px, lw * 4, 0); // no motion
+    const float jit[8][2] = {{0.0f, -0.17f}, {-0.25f, 0.17f}, {0.25f, -0.39f}, {-0.38f, -0.06f},
+                             {0.12f, 0.28f},  {-0.12f, -0.28f}, {0.38f, 0.06f}, {-0.44f, 0.39f}};
+    int fsrBad = 0;
+    QueryPerformanceCounter(&f0);
+    const int fsrFrames = 120;
+    for (int f = 0; f < fsrFrames; f++)
+    {
+        if (f == fsrFrames / 2) // time the second half only: the first frames include FSR's warm-up
+        {
+            BridgeWaitIdle();
+            QueryPerformanceCounter(&f0);
+        }
+        ID3D12GraphicsCommandList* cl = BridgeBegin(imm);
+        FsrInputs in = {};
+        in.color = c12;
+        in.depth = d12;
+        in.motion = m12;
+        in.output = o12;
+        in.renderW = lw;
+        in.renderH = lh;
+        in.outW = fw;
+        in.outH = fh;
+        in.jitterX = jit[f % 8][0];
+        in.jitterY = jit[f % 8][1];
+        in.mvScaleX = (float)lw;
+        in.mvScaleY = (float)lh;
+        in.frameTimeMs = 16.7f;
+        in.cameraNear = 0.1f;
+        in.cameraFar = 10000.0f;
+        in.fovY = 1.0f;
+        in.reset = f == 0;
+        bool ok = cl && FsrDispatch(ctx, cl, in);
+        if (!BridgeEnd(imm) || !ok)
+        {
+            printf("FAIL: FSR dispatch at frame %d\n", f);
+            return 1;
+        }
+    }
+    BridgeWaitIdle();
+    QueryPerformanceCounter(&f1);
+    imm->CopyResource(staging, out);
+    D3D11_MAPPED_SUBRESOURCE m;
+    imm->Map(staging, 0, D3D11_MAP_READ, 0, &m);
+    float lo = 1e9f, hi = -1e9f;
+    for (UINT y = 0; y < fh; y += 7)
+        for (UINT x = 0; x < fw; x += 11)
+        {
+            uint16_t hv = ((const uint16_t*)((const uint8_t*)m.pData + y * m.RowPitch))[x * 4];
+            // half -> float (normal numbers only; others count as wrong)
+            int e = (hv >> 10) & 0x1f;
+            float v = e == 0 || e == 31 ? -1.0f : (float)(1024 + (hv & 0x3ff)) / 1024.0f * (float)(1 << e) / 32768.0f;
+            lo = v < lo ? v : lo;
+            hi = v > hi ? v : hi;
+            if (!(v > c - 0.02f && v < c + 0.02f))
+                fsrBad++;
+        }
+    imm->Unmap(staging, 0);
+    printf("FSR: %d frames, %.3f ms per frame (steady state, incl. hand-off), output range %.4f..%.4f (want %.3f), %d bad samples\n",
+           fsrFrames, (double)(f1.QuadPart - f0.QuadPart) * 1000.0 / (double)qf.QuadPart / (fsrFrames - fsrFrames / 2), lo, hi, c, fsrBad);
+    BridgeWaitIdle();
+    FsrDestroy(ctx);
+    printf(fsrBad ? "FSR FAIL\n" : "FSR PASS\n");
+    return fsrBad ? 1 : 0;
 }

@@ -13,6 +13,7 @@
 #include "common.h"
 #include "ngx.h"
 #include "bridge12.h"
+#include "fsr.h"
 #include "shaders.h"
 
 // ------------------------------------------------------------------ vtable slots (verified against d3d11_1.h)
@@ -414,6 +415,7 @@ struct View
     ID3D11UnorderedAccessView* uavMVHi;
     // D3D12 side of the textures above (DX12 bridge backends only)
     ID3D12Resource *r12Color, *r12MV, *r12Depth, *r12Bias, *r12Out, *r12MVHi;
+    void* fsrCtx;
     uint64_t evalCount;
     uint64_t lastQpc;
 };
@@ -637,7 +639,7 @@ static int Backend()
         s_backend = g_cfg.upscaler;
     return s_backend;
 }
-static bool UsesBridge() { return Backend() == UPSCALER_BRIDGE_TEST; }
+static bool UsesBridge() { return Backend() == UPSCALER_BRIDGE_TEST || Backend() == UPSCALER_FSR; }
 
 static bool InitGpu(ID3D11DeviceContext* ctx)
 {
@@ -662,6 +664,7 @@ static void ReleaseViewResources(View& v)
     if (v.r12Color || v.r12MV || v.r12Depth || v.r12Bias || v.r12Out || v.r12MVHi)
     {
         BridgeWaitIdle(); // D3D12 does not keep resources alive for queued work
+        FsrDestroy(v.fsrCtx);
         SafeRelease(v.r12Color);
         SafeRelease(v.r12MV);
         SafeRelease(v.r12Depth);
@@ -1002,6 +1005,43 @@ static bool BridgeTestEval(ID3D11DeviceContext* imm, View& v)
     return BridgeEnd(imm) && ok;
 }
 
+static int FsrFlags(const View& v)
+{
+    return ((v.flags & NGX_DLSS_IsHDR) ? FSR_HDR : 0) | ((v.flags & NGX_DLSS_AutoExposure) ? FSR_AUTO_EXPOSURE : 0) |
+           ((v.flags & NGX_DLSS_DepthInverted) ? FSR_DEPTH_INVERTED : 0) | (v.texMVHi ? FSR_DISPLAY_RES_MV : 0);
+}
+
+// FSR backend: the same inputs DLSS gets, plus the game's real camera near/far/FOV
+static bool FsrEval(ID3D11DeviceContext* imm, View& v, float jx, float jy, bool reset, float dtMs)
+{
+    ID3D12GraphicsCommandList* cl = BridgeBegin(imm);
+    if (!cl)
+        return false;
+    bool hiMV = v.r12MVHi != nullptr;
+    FsrInputs in = {};
+    in.color = v.r12Color;
+    in.depth = v.r12Depth;
+    in.motion = hiMV ? v.r12MVHi : v.r12MV;
+    in.reactive = (g_cfg.useBiasMask && g_cfg.debugView != 5) ? v.r12Bias : nullptr;
+    in.output = v.r12Out;
+    in.renderW = v.lowW;
+    in.renderH = v.lowH;
+    in.outW = v.fullW;
+    in.outH = v.fullH;
+    in.jitterX = jx;
+    in.jitterY = jy;
+    in.mvScaleX = (float)(hiMV ? v.fullW : v.lowW);
+    in.mvScaleY = (float)(hiMV ? v.fullH : v.lowH);
+    in.frameTimeMs = dtMs;
+    in.sharpness = g_cfg.sharpness;
+    in.cameraNear = s_camNear > 0.0f ? s_camNear : 0.1f;
+    in.cameraFar = s_camFar > 0.0f ? s_camFar : 10000.0f;
+    in.fovY = 2.0f * (float)atan(1.0 / (fabs(s_camP11) > 1e-6f ? fabs(s_camP11) : 1.0));
+    in.reset = reset;
+    bool ok = FsrDispatch(v.fsrCtx, cl, in);
+    return BridgeEnd(imm) && ok;
+}
+
 static volatile LONG s_evalTrace;
 static uint64_t s_traceT0;
 static bool RunJob(ID3D11DeviceContext* imm, Job* job)
@@ -1016,10 +1056,13 @@ static bool RunJob(ID3D11DeviceContext* imm, Job* job)
     if (!s_ngxInitDone)
     {
         s_ngxInitDone = true;
-        if (UsesBridge() ? !BridgeInit(s_dev) : (!NgxInit(s_dev) || !NgxDlssAvailable(s_dev)))
+        bool ready = Backend() == UPSCALER_FSR          ? BridgeInit(s_dev) && FsrLoad()
+                     : Backend() == UPSCALER_BRIDGE_TEST ? BridgeInit(s_dev)
+                                                         : NgxInit(s_dev) && NgxDlssAvailable(s_dev);
+        if (!ready)
         {
             s_fatal = true;
-            LOGE("NGX/DLSS unavailable - mod disabled, game TAA stays active from now on");
+            LOGE("Upscaler unavailable - mod disabled, game TAA stays active from now on");
             imm1->Release();
             return false;
         }
@@ -1036,7 +1079,8 @@ static bool RunJob(ID3D11DeviceContext* imm, Job* job)
     }
     SaveCs(imm, s_csSave);
 
-    if (!UsesBridge() && !v->feature && !CreateFeature(imm, *v))
+    if (Backend() == UPSCALER_FSR ? !v->fsrCtx && !(v->fsrCtx = FsrCreate(v->lowW, v->lowH, v->fullW, v->fullH, FsrFlags(*v)))
+                                  : !UsesBridge() && !v->feature && !CreateFeature(imm, *v))
     {
         if (InterlockedIncrement64(&s_jobFails) >= 3)
         {
@@ -1105,7 +1149,9 @@ static bool RunJob(ID3D11DeviceContext* imm, Job* job)
         bool reset = v->reset || job->reset;
 
         NVSDK_NGX_Result r;
-        if (UsesBridge())
+        if (Backend() == UPSCALER_FSR)
+            r = FsrEval(imm, *v, jx, jy, reset, dtMs) ? NVSDK_NGX_Result_Success : 0xBAD00000u;
+        else if (UsesBridge())
             r = BridgeTestEval(imm, *v) ? NVSDK_NGX_Result_Success : 0xBAD00000u;
         else
         {

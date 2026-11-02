@@ -9,8 +9,7 @@ GRB-FSR is based on [GRB-DLSS](https://github.com/umairBinMohammad/grb-dlss) by 
 **Work in progress. There is no release yet.**
 
 - **Working now:** the mod runs on AMD GPUs. Upstream GRB-DLSS can't: its context hooks are lost there (see [AMD fix](#amd-fix)). Paired with [OptiScaler](https://github.com/optiscaler/OptiScaler), the mod's DLSS calls become FSR 4. Tested on a Radeon RX 6700S, where OptiScaler uses the driver's FSR 4.1.2 RDNA 2 model.
-- **In progress:** the DX11→DX12 bridge (`src/bridge12.cpp`): a D3D12 device on the game's GPU that shares the mod's textures and a fence with the game's D3D11 device. It passes the offline test (`tools/bridge_test.sh`), and `Backend=bridgetest` in `GRB_DLSS.ini` runs it in-game with a plain bilinear upscale.
-- **Planned:** a built-in FSR 4.1 backend using AMD's [FSR SDK 2.4](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) through a DX11→DX12 bridge, so OptiScaler is no longer needed. It would also give FSR the game's real camera parameters.
+- **In testing:** a built-in FSR backend (`Backend=fsr`), no OptiScaler needed. The mod runs AMD's FidelityFX API ([SDK 2.4](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK)) on its own DX11→DX12 bridge (`src/bridge12.cpp`, `src/fsr.cpp`), and gives FSR the game's real camera near/far/FOV. The offline test (`tools/bridge_test.sh`) passes on an RX 6700S with FSR 4.1.2. It has not been tested in-game yet.
 
 ## Requirements
 
@@ -18,7 +17,14 @@ GRB-FSR is based on [GRB-DLSS](https://github.com/umairBinMohammad/grb-dlss) by 
 - Ghost Recon Breakpoint on **DirectX 11** (`GRB.exe`, not Vulkan). In Steam, choose the DX11 entry when you press Play.
 - In the game's video settings: **Anti-Aliasing on, Temporal Injection on**. The mod hooks the TAA pass, so it does nothing without TAA.
 
-## Install (current, with OptiScaler)
+## Install (built-in FSR, in testing)
+
+1. Build `dinput8.dll` (see [Build](#build)) and copy it and `config/GRB_DLSS.ini` next to `GRB.exe`.
+2. From the FidelityFX SDK 2.4 (`Kits/FidelityFX/signedbin/`), copy `amd_fidelityfx_loader_dx12.dll` and `amd_fidelityfx_upscaler_dx12.dll` to the same folder. These are AMD's signed DLLs; see AMD's license in [`third_party/ffx/license.md`](third_party/ffx/license.md).
+3. In `GRB_DLSS.ini`, set `Backend=fsr` under `[Upscaler]`. Remove or rename OptiScaler (`winmm.dll`, `dxgi.dll`, ...) if it is installed.
+4. `GRB_DLSS.log` should show `FSR context ... using 4.1.2` (or `3.1.x` on GPUs without FSR 4).
+
+## Install (with OptiScaler)
 
 1. Build `dinput8.dll` (see [Build](#build)) and copy it and `config/GRB_DLSS.ini` next to `GRB.exe`.
 2. Install OptiScaler as `winmm.dll` in the same folder. Tested with 0.9.4 and with the v10 nightly of 2026-11-01.
@@ -49,8 +55,8 @@ See [`config/GRB_DLSS.ini`](config/GRB_DLSS.ini). Every key is documented inline
 ## Credits
 
 - [GRB-DLSS](https://github.com/umairBinMohammad/grb-dlss) by Umair Bin Mohammad: the TAA replacement, render-scale patch, in-game menu and everything else this builds on.
-- [OptiScaler](https://github.com/optiscaler/OptiScaler), which currently provides the FSR 4 path.
-- AMD FSR / FidelityFX SDK. DejaVu fonts, used for the menu.
+- [OptiScaler](https://github.com/optiscaler/OptiScaler), the first FSR 4 path for this mod, and the model for the bridge's shared fence.
+- AMD FSR / FidelityFX SDK: the API headers in `third_party/ffx` (MIT) and the signed runtime DLLs. DejaVu fonts, used for the menu.
 
 ## License
 

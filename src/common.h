@@ -76,7 +76,8 @@ struct Config
 enum
 {
     UPSCALER_NGX = 0,         // DLSS through NVIDIA NGX, or FSR through OptiScaler
-    UPSCALER_BRIDGE_TEST = 1, // DX12 bridge test: plain bilinear upscale on a D3D12 queue (no FSR yet)
+    UPSCALER_BRIDGE_TEST = 1, // DX12 bridge test: plain bilinear upscale on a D3D12 queue
+    UPSCALER_FSR = 2,         // FSR through the FidelityFX API on the DX12 bridge
 };
 extern Config g_cfg;
 extern wchar_t g_modDir[MAX_PATH];

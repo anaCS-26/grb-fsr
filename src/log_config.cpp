@@ -165,6 +165,8 @@ static int ReadUpscaler(const wchar_t* ini)
     GetPrivateProfileStringW(L"Upscaler", L"Backend", L"ngx", buf, 32, ini);
     if (lstrcmpiW(buf, L"bridgetest") == 0)
         return UPSCALER_BRIDGE_TEST;
+    if (lstrcmpiW(buf, L"fsr") == 0)
+        return UPSCALER_FSR;
     return UPSCALER_NGX;
 }
 
