@@ -71,7 +71,7 @@ struct VtHooks
     void** vt;
     void* orig[kMaxSlots];
 };
-static VtHooks s_ctxHooks[16];
+static VtHooks s_ctxHooks[32];
 static volatile LONG s_ctxHookCount;
 static SRWLOCK s_hookLock = SRWLOCK_INIT;
 static void** s_devVt;
@@ -84,6 +84,7 @@ static void HookOneVtable(ID3D11DeviceContext* ctx, const char* iface);
 static void STDMETHODCALLTYPE Hk_ExecuteCommandList(ID3D11DeviceContext* ctx, ID3D11CommandList* cl, BOOL restore);
 
 static void LogUnknownCtxVtable(void** vt);
+static VtHooks* AdoptRuntimeVtable(void** vt);
 static inline VtHooks* HooksFor(ID3D11DeviceContext* ctx)
 {
     void** vt = *(void***)ctx;
@@ -91,6 +92,10 @@ static inline VtHooks* HooksFor(ID3D11DeviceContext* ctx)
     for (LONG i = n - 1; i >= 0; i--)
         if (s_ctxHooks[i].vt == vt)
             return &s_ctxHooks[i];
+    // a context we never saw, reaching our hooks through a d3d11 runtime table we patched
+    if (VtHooks* a = AdoptRuntimeVtable(vt))
+        return a;
+    n = s_ctxHookCount;
     // a vtable another layer copied from one we had patched: the originals of the most recently
     // hooked vtable are the best match (d3d11's context vtables point at the same functions)
     LogUnknownCtxVtable(vt);
@@ -2453,14 +2458,215 @@ static bool PatchSlot(void** vt, int idx, void* hook, void** orig)
     return true;
 }
 
+// ------------------------------------------------------------------ d3d11 runtime function tables
+// Without D3D11 driver command lists (AMD), the d3d11 runtime gives every context its own copy of a
+// static per-flavor function table and rewrites entries of that copy as it batches state changes
+// ("amortized" entry points). Those entries always end up calling the static table, and the copy is
+// refilled from it, so patching only the per-context copy loses the hooks for draws, Map/Unmap,
+// UpdateSubresource and so on. We find the static table each context was built from and hook its
+// entries too; the originals we forward to are the table's own entries (never an amortized wrapper).
+enum
+{
+    kRtEntries = 151, // ID3D11DeviceContext4 methods
+    kRtMinScore = 40,
+};
+struct RtTable
+{
+    void** base;
+    void* orig[kMaxSlots];
+};
+static RtTable s_rtTables[8];
+static volatile LONG s_rtTableCount;
+static const uint8_t* s_d3d11Lo;
+static const uint8_t* s_d3d11Hi;
+static const uint8_t* s_rdataLo;
+static const uint8_t* s_rdataHi;
+static bool s_rtDisabled;
+
+static void* HookFnFor(int idx);
+
+static bool RtInitModule()
+{
+    if (s_rdataLo || s_rtDisabled)
+        return s_rdataLo != nullptr;
+    HMODULE m = GetModuleHandleW(L"d3d11.dll");
+    if (!m)
+        return false;
+    const uint8_t* b = (const uint8_t*)m;
+    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)b;
+    const IMAGE_NT_HEADERS64* nt = (const IMAGE_NT_HEADERS64*)(b + dos->e_lfanew);
+    s_d3d11Lo = b;
+    s_d3d11Hi = b + nt->OptionalHeader.SizeOfImage;
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++)
+        if (memcmp(sec[i].Name, ".rdata", 7) == 0)
+        {
+            s_rdataLo = b + sec[i].VirtualAddress;
+            s_rdataHi = s_rdataLo + sec[i].Misc.VirtualSize;
+        }
+    if (!s_rdataLo)
+    {
+        s_rtDisabled = true;
+        LOGI("d3d11 runtime tables: no .rdata section found, using per-context hooks only");
+    }
+    return s_rdataLo != nullptr;
+}
+
+static inline bool InD3D11(const void* p)
+{
+    return (const uint8_t*)p >= s_d3d11Lo && (const uint8_t*)p < s_d3d11Hi;
+}
+
+// how many entries of the per-context table vt look like a copy of static table B
+static int RtScore(void** vt, void** B, const RtTable* known)
+{
+    int score = 0;
+    for (int i = 0; i < kRtEntries; i++)
+    {
+        void* v = vt[i];
+        if (!v)
+            continue;
+        if (v == B[i] || (known && i < kMaxSlots && known->orig[i] && v == known->orig[i]))
+            score++;
+    }
+    return score;
+}
+
+static RtTable* RtFindTable(void** vt, int* scoreOut)
+{
+    *scoreOut = 0;
+    if (!RtInitModule() || !Readable(vt, sizeof(void*) * kRtEntries))
+        return nullptr;
+    // Score every candidate base: tables we already patched, and every place in d3d11's .rdata that holds
+    // one of vt's d3d11 function pointers at the same index. Flavors share many entries (IUnknown etc.),
+    // so always take the best match, never just the first good-enough one.
+    void** bestBase = nullptr;
+    int bestScore = 0;
+    LONG n = s_rtTableCount;
+    for (LONG i = 0; i < n; i++)
+    {
+        int sc = RtScore(vt, s_rtTables[i].base, &s_rtTables[i]);
+        if (sc > bestScore)
+        {
+            bestScore = sc;
+            bestBase = s_rtTables[i].base;
+        }
+    }
+    const uint8_t* hiBase = s_rdataHi - sizeof(void*) * kRtEntries;
+    for (int a = 0; a < kRtEntries; a++)
+    {
+        void* v = vt[a];
+        if (!v || !InD3D11(v))
+            continue;
+        for (const uint8_t* q = s_rdataLo; q + sizeof(void*) <= s_rdataHi; q += sizeof(void*))
+        {
+            if (*(void* const*)q != v)
+                continue;
+            const uint8_t* bp = q - a * sizeof(void*);
+            if (bp < s_rdataLo || bp > hiBase || (void**)bp == bestBase)
+                continue;
+            const RtTable* known = nullptr;
+            for (LONG i = 0; i < n; i++)
+                if (s_rtTables[i].base == (void**)bp)
+                    known = &s_rtTables[i];
+            int sc = RtScore(vt, (void**)bp, known);
+            if (sc > bestScore)
+            {
+                bestScore = sc;
+                bestBase = (void**)bp;
+            }
+        }
+    }
+    *scoreOut = bestScore;
+    if (!bestBase || bestScore < kRtMinScore)
+        return nullptr;
+    for (LONG i = 0; i < s_rtTableCount; i++)
+        if (s_rtTables[i].base == bestBase)
+            return &s_rtTables[i];
+    if (s_rtTableCount >= 8)
+        return nullptr;
+    RtTable* t = &s_rtTables[s_rtTableCount];
+    memset(t, 0, sizeof(*t));
+    t->base = bestBase;
+    for (int i = 0; i < kMaxSlots && i < kRtEntries; i++)
+        if (HookFnFor(i))
+        {
+            if (bestBase[i] == HookFnFor(i))
+                continue; // cannot happen for a fresh table, but never record ourselves as an original
+            t->orig[i] = bestBase[i];
+        }
+    MemoryBarrier();
+    s_rtTableCount++;
+    int patched = 0;
+    for (int i = 0; i < kMaxSlots && i < kRtEntries; i++)
+        if (HookFnFor(i) && t->orig[i])
+        {
+            DWORD old;
+            if (!VirtualProtect(&bestBase[i], sizeof(void*), PAGE_READWRITE, &old))
+                continue;
+            bestBase[i] = HookFnFor(i);
+            DWORD tmp;
+            VirtualProtect(&bestBase[i], sizeof(void*), old, &tmp);
+            patched++;
+        }
+    LOGI("d3d11 runtime table d3d11.dll+0x%llX hooked (%d entries, match %d/%d)",
+         (unsigned long long)((const uint8_t*)bestBase - s_d3d11Lo), patched, bestScore, (int)kRtEntries);
+    return t;
+}
+
+// Context vtable we did not hook, calling into a runtime table we patched: give it its own record.
+static VtHooks* AdoptRuntimeVtable(void** vt)
+{
+    if (!s_rtTableCount)
+        return nullptr;
+    AcquireSRWLockExclusive(&s_hookLock);
+    VtHooks* h = nullptr;
+    LONG n = s_ctxHookCount;
+    for (LONG i = 0; i < n; i++)
+        if (s_ctxHooks[i].vt == vt)
+            h = &s_ctxHooks[i];
+    if (!h && n < 32)
+    {
+        int score = 0;
+        RtTable* t = RtFindTable(vt, &score);
+        if (t)
+        {
+            h = &s_ctxHooks[n];
+            memset(h, 0, sizeof(*h));
+            h->vt = vt;
+            for (int i = 0; i < kMaxSlots; i++)
+                h->orig[i] = t->orig[i];
+            MemoryBarrier();
+            s_ctxHookCount = n + 1;
+            LOGI("Context vtable %p adopted (runtime table d3d11.dll+0x%llX, match %d)", vt,
+                 (unsigned long long)((const uint8_t*)t->base - s_d3d11Lo), score);
+        }
+    }
+    ReleaseSRWLockExclusive(&s_hookLock);
+    return h;
+}
+
 static void HookOneVtable(ID3D11DeviceContext* ctx, const char* iface)
 {
     void** vt = *(void***)ctx;
-    if (vt[kCtx_Draw] == (void*)Hk_Draw && vt[kCtx_ExecuteCommandList] == (void*)Hk_ExecuteCommandList)
-        return;
-    AcquireSRWLockExclusive(&s_hookLock);
-    if (vt[kCtx_Draw] != (void*)Hk_Draw || vt[kCtx_ExecuteCommandList] != (void*)Hk_ExecuteCommandList)
     {
+        bool known = false;
+        LONG kn = s_ctxHookCount;
+        for (LONG i = 0; i < kn; i++)
+            if (s_ctxHooks[i].vt == vt)
+                known = true;
+        if (known && vt[kCtx_Draw] == (void*)Hk_Draw && vt[kCtx_ExecuteCommandList] == (void*)Hk_ExecuteCommandList)
+            return;
+    }
+    AcquireSRWLockExclusive(&s_hookLock);
+    bool haveRecord = false;
+    for (LONG i = 0; i < s_ctxHookCount; i++)
+        if (s_ctxHooks[i].vt == vt)
+            haveRecord = true;
+    if (!haveRecord || vt[kCtx_Draw] != (void*)Hk_Draw || vt[kCtx_ExecuteCommandList] != (void*)Hk_ExecuteCommandList)
+    {
+        int rtScore = 0;
+        RtTable* rtt = RtFindTable(vt, &rtScore);
         ID3D11DeviceContext1* c1 = nullptr;
         ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), (void**)&c1);
         LONG n = s_ctxHookCount;
@@ -2469,13 +2675,21 @@ static void HookOneVtable(ID3D11DeviceContext* ctx, const char* iface)
             if (s_ctxHooks[i].vt == vt)
                 h = &s_ctxHooks[i];
         bool fresh = false;
-        if (!h && n < 16)
+        if (!h && n < 32)
         {
             h = &s_ctxHooks[n];
             fresh = true;
         }
         if (h)
         {
+            if (fresh)
+                memset(h->orig, 0, sizeof(h->orig));
+            // originals come from the runtime's static table: the per-context copy may currently hold
+            // amortized wrappers (which call the static table, i.e. us) or our own hooks
+            if (rtt)
+                for (int i = 0; i < kMaxSlots; i++)
+                    if (rtt->orig[i])
+                        h->orig[i] = rtt->orig[i];
             h->vt = vt;
             // publish the record before any slot points at our hooks, so a call that races the
             // patching finds this vtable's originals (not another device's)
@@ -2509,8 +2723,9 @@ static void HookOneVtable(ID3D11DeviceContext* ctx, const char* iface)
                 s_ctxHookCount = n + 1;
             MemoryBarrier();
             PatchSlot(vt, kCtx_Draw, (void*)Hk_Draw, &h->orig[kCtx_Draw]); // last: the "hooked" marker
-            LOGI("Context %p [%s] (%s) vtable %p hooked", ctx, iface,
-                 ctx->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE ? "immediate" : "deferred", vt);
+            LOGI("Context %p [%s] (%s) vtable %p hooked%s", ctx, iface,
+                 ctx->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE ? "immediate" : "deferred", vt,
+                 rtt ? " (+ d3d11 runtime table)" : "");
         }
         else
             LOGE("Too many context vtables, %p not hooked", vt);
@@ -2832,4 +3047,28 @@ void ModBootstrap()
     OverlayInit();
     SlCamInit();
     LOGI("Hooks installed, waiting for the game's TAA pass");
+}
+
+// hook installed for each context vtable slot (null = slot not hooked)
+static void* HookFnFor(int idx)
+{
+    switch (idx)
+    {
+    case kCtx_PSSetShader: return (void*)Hk_PSSetShader;
+    case kCtx_Map: return (void*)Hk_Map;
+    case kCtx_Unmap: return (void*)Hk_Unmap;
+    case kCtx_UpdateSubresource: return (void*)Hk_UpdateSubresource;
+    case kCtx_ExecuteCommandList: return (void*)Hk_ExecuteCommandList;
+    case kCtx_FinishCommandList: return (void*)Hk_FinishCommandList;
+    case kCtx_CopySubresourceRegion: return (void*)Hk_CopySubresourceRegion;
+    case kCtx_CopyResource: return (void*)Hk_CopyResource;
+    case kCtx_ClearState: return (void*)Hk_ClearState;
+    case kCtx1_UpdateSubresource1: return (void*)Hk_UpdateSubresource1;
+    case kCtx_DrawIndexed: return (void*)Hk_DrawIndexed;
+    case kCtx_Dispatch: return (void*)Hk_Dispatch;
+    case kCtx_DrawInstanced: return (void*)Hk_DrawInstanced;
+    case kCtx_DrawIndexedInstanced: return (void*)Hk_DrawIndexedInstanced;
+    case kCtx_Draw: return (void*)Hk_Draw;
+    default: return nullptr;
+    }
 }
