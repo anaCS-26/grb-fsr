@@ -9,6 +9,7 @@ GRB-FSR is based on [GRB-DLSS](https://github.com/umairBinMohammad/grb-dlss) by 
 **Work in progress. There is no release yet.**
 
 - **Working now:** the mod runs on AMD GPUs. Upstream GRB-DLSS can't: its context hooks are lost there (see [AMD fix](#amd-fix)). Paired with [OptiScaler](https://github.com/optiscaler/OptiScaler), the mod's DLSS calls become FSR 4. Tested on a Radeon RX 6700S, where OptiScaler uses the driver's FSR 4.1.2 RDNA 2 model.
+- **In progress:** the DX11→DX12 bridge (`src/bridge12.cpp`): a D3D12 device on the game's GPU that shares the mod's textures and a fence with the game's D3D11 device. It passes the offline test (`tools/bridge_test.sh`), and `Backend=bridgetest` in `GRB_DLSS.ini` runs it in-game with a plain bilinear upscale.
 - **Planned:** a built-in FSR 4.1 backend using AMD's [FSR SDK 2.4](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) through a DX11→DX12 bridge, so OptiScaler is no longer needed. It would also give FSR the game's real camera parameters.
 
 ## Requirements

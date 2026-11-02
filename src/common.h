@@ -71,6 +71,12 @@ struct Config
     int menuKey;
     int dilatedMV;
     int fgCameraData;     // 1: feed the game's real camera matrices to Streamline frame generation        // 1: full-resolution depth-dilated motion vectors for DLSS / frame generation
+    int upscaler;         // UPSCALER_* (read once: changing it needs a game restart)
+};
+enum
+{
+    UPSCALER_NGX = 0,         // DLSS through NVIDIA NGX, or FSR through OptiScaler
+    UPSCALER_BRIDGE_TEST = 1, // DX12 bridge test: plain bilinear upscale on a D3D12 queue (no FSR yet)
 };
 extern Config g_cfg;
 extern wchar_t g_modDir[MAX_PATH];

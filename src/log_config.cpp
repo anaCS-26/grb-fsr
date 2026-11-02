@@ -159,6 +159,15 @@ static float ReadScale(const wchar_t* ini)
     return v;
 }
 
+static int ReadUpscaler(const wchar_t* ini)
+{
+    wchar_t buf[32];
+    GetPrivateProfileStringW(L"Upscaler", L"Backend", L"ngx", buf, 32, ini);
+    if (lstrcmpiW(buf, L"bridgetest") == 0)
+        return UPSCALER_BRIDGE_TEST;
+    return UPSCALER_NGX;
+}
+
 void LoadConfig()
 {
     wchar_t ini[MAX_PATH];
@@ -166,6 +175,7 @@ void LoadConfig()
     lstrcatW(ini, L"GRB_DLSS.ini");
 
     g_cfg.enabled = ReadInt(ini, L"DLSS", L"Enabled", 1);
+    g_cfg.upscaler = ReadUpscaler(ini);
     g_cfg.toggleKey = ReadInt(ini, L"DLSS", L"ToggleKey", 0x23 /* End */);
     g_cfg.preset = ReadPreset(ini);
     g_cfg.presetKey = ReadInt(ini, L"DLSS", L"PresetCycleKey", 0);

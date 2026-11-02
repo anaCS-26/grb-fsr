@@ -12,6 +12,7 @@
 // the game's command list (which starts with the resolve draw) execute.
 #include "common.h"
 #include "ngx.h"
+#include "bridge12.h"
 #include "shaders.h"
 
 // ------------------------------------------------------------------ vtable slots (verified against d3d11_1.h)
@@ -411,6 +412,8 @@ struct View
     ID3D11ShaderResourceView* srvBias;
     ID3D11Texture2D* texMVHi;
     ID3D11UnorderedAccessView* uavMVHi;
+    // D3D12 side of the textures above (DX12 bridge backends only)
+    ID3D12Resource *r12Color, *r12MV, *r12Depth, *r12Bias, *r12Out, *r12MVHi;
     uint64_t evalCount;
     uint64_t lastQpc;
 };
@@ -626,6 +629,16 @@ static bool InitGpuLocked(ID3D11DeviceContext* ctx)
     return true;
 }
 
+// upscaler backend, latched on first use (the ini is re-read while playing)
+static int s_backend = -1;
+static int Backend()
+{
+    if (s_backend < 0)
+        s_backend = g_cfg.upscaler;
+    return s_backend;
+}
+static bool UsesBridge() { return Backend() == UPSCALER_BRIDGE_TEST; }
+
 static bool InitGpu(ID3D11DeviceContext* ctx)
 {
     LONG st = s_gpuInitState;
@@ -646,6 +659,16 @@ static void ReleaseViewResources(View& v)
         LOGI("DLSS feature released (0x%08X)", r);
     }
     v.feature = nullptr;
+    if (v.r12Color || v.r12MV || v.r12Depth || v.r12Bias || v.r12Out || v.r12MVHi)
+    {
+        BridgeWaitIdle(); // D3D12 does not keep resources alive for queued work
+        SafeRelease(v.r12Color);
+        SafeRelease(v.r12MV);
+        SafeRelease(v.r12Depth);
+        SafeRelease(v.r12Bias);
+        SafeRelease(v.r12Out);
+        SafeRelease(v.r12MVHi);
+    }
     SafeRelease(v.uavColor);
     SafeRelease(v.uavMV);
     SafeRelease(v.uavDepth);
@@ -665,8 +688,10 @@ static void ReleaseViewResources(View& v)
     SafeRelease(v.texOut);
 }
 
-static ID3D11Texture2D* MakeTex(UINT w, UINT h, DXGI_FORMAT f, UINT bind)
+static ID3D11Texture2D* MakeTex(UINT w, UINT h, DXGI_FORMAT f, UINT bind, ID3D12Resource** r12 = nullptr)
 {
+    if (r12 && UsesBridge())
+        return BridgeMakeTex(w, h, f, bind, r12);
     D3D11_TEXTURE2D_DESC td = {};
     td.Width = w;
     td.Height = h;
@@ -686,11 +711,17 @@ static ID3D11Texture2D* MakeTex(UINT w, UINT h, DXGI_FORMAT f, UINT bind)
 static bool CreateViewResources(View& v)
 {
     const UINT rw = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-    v.texColor = MakeTex(v.lowW, v.lowH, DXGI_FORMAT_R16G16B16A16_FLOAT, rw);
-    v.texMV = MakeTex(v.lowW, v.lowH, DXGI_FORMAT_R16G16_FLOAT, rw);
-    v.texDepth = MakeTex(v.lowW, v.lowH, DXGI_FORMAT_R32_FLOAT, rw);
-    v.texBias = MakeTex(v.lowW, v.lowH, DXGI_FORMAT_R8_UNORM, rw);
-    v.texOut = MakeTex(v.fullW, v.fullH, DXGI_FORMAT_R16G16B16A16_FLOAT, rw);
+    if (UsesBridge() && !BridgeInit(s_dev))
+    {
+        s_fatal = true;
+        LOGE("DX12 bridge unavailable - mod disabled, game TAA stays active from now on");
+        return false;
+    }
+    v.texColor = MakeTex(v.lowW, v.lowH, DXGI_FORMAT_R16G16B16A16_FLOAT, rw, &v.r12Color);
+    v.texMV = MakeTex(v.lowW, v.lowH, DXGI_FORMAT_R16G16_FLOAT, rw, &v.r12MV);
+    v.texDepth = MakeTex(v.lowW, v.lowH, DXGI_FORMAT_R32_FLOAT, rw, &v.r12Depth);
+    v.texBias = MakeTex(v.lowW, v.lowH, DXGI_FORMAT_R8_UNORM, rw, &v.r12Bias);
+    v.texOut = MakeTex(v.fullW, v.fullH, DXGI_FORMAT_R16G16B16A16_FLOAT, rw, &v.r12Out);
     if (!v.texColor || !v.texMV || !v.texDepth || !v.texBias || !v.texOut)
         return false;
     s_dev->CreateUnorderedAccessView(v.texColor, nullptr, &v.uavColor);
@@ -702,7 +733,7 @@ static bool CreateViewResources(View& v)
     s_dev->CreateShaderResourceView(v.texDepth, nullptr, &v.srvDepth);
     if (!(v.flags & NGX_DLSS_MVLowRes))
     {
-        v.texMVHi = MakeTex(v.fullW, v.fullH, DXGI_FORMAT_R16G16_FLOAT, rw);
+        v.texMVHi = MakeTex(v.fullW, v.fullH, DXGI_FORMAT_R16G16_FLOAT, rw, &v.r12MVHi);
         if (v.texMVHi)
             s_dev->CreateUnorderedAccessView(v.texMVHi, nullptr, &v.uavMVHi);
         if (!v.uavMVHi)
@@ -961,6 +992,16 @@ static void NoteEval(LONG64 taaIndex);
 void SlCamUpdate(const uint8_t* pass, const float* reproj, const float* jitter, const float* low);
 void SlCamInit();
 void SlCamStats(char* out, size_t n);
+// DX12 bridge test backend: hand the prepared colour to D3D12, upscale it there, hand the output back
+static bool BridgeTestEval(ID3D11DeviceContext* imm, View& v)
+{
+    ID3D12GraphicsCommandList* cl = BridgeBegin(imm);
+    if (!cl)
+        return false;
+    bool ok = BridgeTestUpscale(cl, v.r12Color, v.r12Out, v.fullW, v.fullH);
+    return BridgeEnd(imm) && ok;
+}
+
 static volatile LONG s_evalTrace;
 static uint64_t s_traceT0;
 static bool RunJob(ID3D11DeviceContext* imm, Job* job)
@@ -975,7 +1016,7 @@ static bool RunJob(ID3D11DeviceContext* imm, Job* job)
     if (!s_ngxInitDone)
     {
         s_ngxInitDone = true;
-        if (!NgxInit(s_dev) || !NgxDlssAvailable(s_dev))
+        if (UsesBridge() ? !BridgeInit(s_dev) : (!NgxInit(s_dev) || !NgxDlssAvailable(s_dev)))
         {
             s_fatal = true;
             LOGE("NGX/DLSS unavailable - mod disabled, game TAA stays active from now on");
@@ -995,7 +1036,7 @@ static bool RunJob(ID3D11DeviceContext* imm, Job* job)
     }
     SaveCs(imm, s_csSave);
 
-    if (!v->feature && !CreateFeature(imm, *v))
+    if (!UsesBridge() && !v->feature && !CreateFeature(imm, *v))
     {
         if (InterlockedIncrement64(&s_jobFails) >= 3)
         {
@@ -1063,42 +1104,48 @@ static bool RunJob(ID3D11DeviceContext* imm, Job* job)
         float jx = tc.subPixelJitter[0] * g_cfg.jitterSignX, jy = tc.subPixelJitter[1] * g_cfg.jitterSignY;
         bool reset = v->reset || job->reset;
 
-        NVSDK_NGX_Parameter* p = v->params;
-        p->SetRes("Color", v->texColor);
-        p->SetRes("Output", v->texOut);
-        p->SetRes("Depth", v->texDepth);
-        bool hiMV = v->texMVHi != nullptr;
-        p->SetRes("MotionVectors", hiMV ? v->texMVHi : v->texMV);
-        p->SetRes("DLSS.Input.Bias.Current.Color.Mask", (g_cfg.useBiasMask && g_cfg.debugView != 5) ? v->texBias : nullptr);
-        p->SetRes("ExposureTexture", nullptr);
-        p->SetF("Jitter.Offset.X", jx);
-        p->SetF("Jitter.Offset.Y", jy);
-        p->SetF("MV.Scale.X", (float)(hiMV ? v->fullW : v->lowW));
-        p->SetF("MV.Scale.Y", (float)(hiMV ? v->fullH : v->lowH));
-        p->SetI("Reset", reset ? 1 : 0);
-        p->SetF("Sharpness", g_cfg.sharpness);
-        p->SetUI("DLSS.Render.Subrect.Dimensions.Width", v->lowW);
-        p->SetUI("DLSS.Render.Subrect.Dimensions.Height", v->lowH);
-        p->SetUI("DLSS.Input.Color.Subrect.Base.X", 0);
-        p->SetUI("DLSS.Input.Color.Subrect.Base.Y", 0);
-        p->SetUI("DLSS.Input.Depth.Subrect.Base.X", 0);
-        p->SetUI("DLSS.Input.Depth.Subrect.Base.Y", 0);
-        p->SetUI("DLSS.Input.MV.Subrect.Base.X", 0);
-        p->SetUI("DLSS.Input.MV.Subrect.Base.Y", 0);
-        p->SetUI("DLSS.Output.Subrect.Base.X", 0);
-        p->SetUI("DLSS.Output.Subrect.Base.Y", 0);
-        p->SetF("DLSS.Pre.Exposure", 1.0f);
-        p->SetF("DLSS.Exposure.Scale", 1.0f);
-        p->SetF("FrameTimeDeltaInMsec", dtMs);
-        // camera data for OptiScaler's frame generation (ignored by DLSS itself)
-        float vfov = 2.0f * (float)atan(1.0 / (fabs(s_camP11) > 1e-6f ? fabs(s_camP11) : 1.0));
-        p->SetF("FSR.cameraNear", s_camNear > 0.0f ? s_camNear : 0.1f);
-        p->SetF("FSR.cameraFar", s_camFar > 0.0f ? s_camFar : 10000.0f);
-        p->SetF("FSR.cameraFovAngleVertical", vfov);
-        p->SetF("FSR.frameTimeDelta", dtMs);
-        p->SetF("FSR.viewSpaceToMetersFactor", 1.0f);
+        NVSDK_NGX_Result r;
+        if (UsesBridge())
+            r = BridgeTestEval(imm, *v) ? NVSDK_NGX_Result_Success : 0xBAD00000u;
+        else
+        {
+            NVSDK_NGX_Parameter* p = v->params;
+            p->SetRes("Color", v->texColor);
+            p->SetRes("Output", v->texOut);
+            p->SetRes("Depth", v->texDepth);
+            bool hiMV = v->texMVHi != nullptr;
+            p->SetRes("MotionVectors", hiMV ? v->texMVHi : v->texMV);
+            p->SetRes("DLSS.Input.Bias.Current.Color.Mask", (g_cfg.useBiasMask && g_cfg.debugView != 5) ? v->texBias : nullptr);
+            p->SetRes("ExposureTexture", nullptr);
+            p->SetF("Jitter.Offset.X", jx);
+            p->SetF("Jitter.Offset.Y", jy);
+            p->SetF("MV.Scale.X", (float)(hiMV ? v->fullW : v->lowW));
+            p->SetF("MV.Scale.Y", (float)(hiMV ? v->fullH : v->lowH));
+            p->SetI("Reset", reset ? 1 : 0);
+            p->SetF("Sharpness", g_cfg.sharpness);
+            p->SetUI("DLSS.Render.Subrect.Dimensions.Width", v->lowW);
+            p->SetUI("DLSS.Render.Subrect.Dimensions.Height", v->lowH);
+            p->SetUI("DLSS.Input.Color.Subrect.Base.X", 0);
+            p->SetUI("DLSS.Input.Color.Subrect.Base.Y", 0);
+            p->SetUI("DLSS.Input.Depth.Subrect.Base.X", 0);
+            p->SetUI("DLSS.Input.Depth.Subrect.Base.Y", 0);
+            p->SetUI("DLSS.Input.MV.Subrect.Base.X", 0);
+            p->SetUI("DLSS.Input.MV.Subrect.Base.Y", 0);
+            p->SetUI("DLSS.Output.Subrect.Base.X", 0);
+            p->SetUI("DLSS.Output.Subrect.Base.Y", 0);
+            p->SetF("DLSS.Pre.Exposure", 1.0f);
+            p->SetF("DLSS.Exposure.Scale", 1.0f);
+            p->SetF("FrameTimeDeltaInMsec", dtMs);
+            // camera data for OptiScaler's frame generation (ignored by DLSS itself)
+            float vfov = 2.0f * (float)atan(1.0 / (fabs(s_camP11) > 1e-6f ? fabs(s_camP11) : 1.0));
+            p->SetF("FSR.cameraNear", s_camNear > 0.0f ? s_camNear : 0.1f);
+            p->SetF("FSR.cameraFar", s_camFar > 0.0f ? s_camFar : 10000.0f);
+            p->SetF("FSR.cameraFovAngleVertical", vfov);
+            p->SetF("FSR.frameTimeDelta", dtMs);
+            p->SetF("FSR.viewSpaceToMetersFactor", 1.0f);
 
-        NVSDK_NGX_Result r = g_ngx.EvaluateFeature(imm, v->feature, p, nullptr);
+            r = g_ngx.EvaluateFeature(imm, v->feature, p, nullptr);
+        }
         v->evalCount++;
         NoteEval(job->taaIndex);
         if (g_cfg.fgCameraData)
