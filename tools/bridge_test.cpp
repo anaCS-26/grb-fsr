@@ -39,11 +39,19 @@ int main(int argc, char** argv)
     int want = -1;
     const char* fsrDir = nullptr;
     int fsrMajor = 0;
+    float fsrSharp = 0.0f;
+    int sharpAt = 0, recreate = 0; // sharpening from this frame on; destroy/create cycles before the run (4 <-> 3)
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "fsr") && i + 1 < argc)
             fsrDir = argv[++i];
         else if (!strcmp(argv[i], "ver") && i + 1 < argc)
             fsrMajor = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "sharp") && i + 1 < argc)
+            fsrSharp = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "sharpat") && i + 1 < argc)
+            sharpAt = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "recreate") && i + 1 < argc)
+            recreate = atoi(argv[++i]);
         else
             want = atoi(argv[i]);
     HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
@@ -169,6 +177,12 @@ int main(int argc, char** argv)
     if (!FsrLoad())
         return 1;
     void* ctx = FsrCreate(lw, lh, fw, fh, FSR_DEPTH_INVERTED, fsrMajor);
+    for (int r = 0; r < recreate && ctx; r++)
+    {
+        BridgeWaitIdle();
+        FsrDestroy(ctx);
+        ctx = FsrCreate(lw, lh, fw, fh, FSR_DEPTH_INVERTED, r == recreate - 1 ? fsrMajor : (r & 1) ? 4 : 3);
+    }
     if (!ctx)
         return 1;
     const float c = 0.5f;
@@ -218,6 +232,7 @@ int main(int argc, char** argv)
         in.cameraFar = 10000.0f;
         in.fovY = 1.0f;
         in.reset = f == 0;
+        in.sharpness = f >= sharpAt ? fsrSharp : 0.0f;
         bool ok = cl && FsrDispatch(ctx, cl, in);
         if (!BridgeEnd(imm) || !ok)
         {
