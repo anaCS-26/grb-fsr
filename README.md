@@ -1,91 +1,55 @@
-# GRB-DLSS
+# GRB-FSR
 
-NVIDIA DLSS Super Resolution for **Tom Clancy's Ghost Recon Breakpoint** (DirectX 11).
+AMD FSR 4 upscaling for **Tom Clancy's Ghost Recon Breakpoint** (DirectX 11).
 
-The game only ships temporal AA ("Temporal Injection"). This mod replaces that TAA pass with DLSS. It feeds DLSS the game's own low-resolution colour, depth, motion vectors and jitter, then writes the upscaled image back where the TAA output used to go. The rest of the frame (post-processing, UI) is untouched.
+GRB-FSR is based on [GRB-DLSS](https://github.com/umairBinMohammad/grb-dlss) by Umair Bin Mohammad, which replaces the game's TAA ("Temporal Injection") pass with an upscaler fed by the game's own low-resolution colour, depth, motion vectors and jitter. This project adds what's needed to run FSR 4 on AMD GPUs.
 
-## Features
+## Status
 
-- DLSS Super Resolution / DLAA in place of the game's TAA.
-- DLSS presets F, J, K, L and M (CNN, DLSS 4 and DLSS 4.5 transformer models).
-- Custom internal render resolution at any percentage from 25% to 100%. This works by patching the engine's dynamic-resolution ratio, so the whole renderer follows it.
-- In-game menu (**Home**) for render scale, preset and DLSS on/off. **End** switches between DLSS and the game's TAA live for comparison.
-- Most `GRB_DLSS.ini` changes apply in-game as soon as you save the file.
-- Works without other tools: it loads NVIDIA's NGX runtime from the driver, plus the `nvngx_dlss.dll` you place in the game folder. It also works alongside [OptiScaler](https://github.com/optiscaler/OptiScaler) (installed as `winmm.dll`), whose frame generation can then run on the mod's DLSS inputs.
+**Work in progress. There is no release yet.**
+
+- **Working now:** the mod runs on AMD GPUs. Upstream GRB-DLSS can't: its context hooks are lost there (see [AMD fix](#amd-fix)). Paired with [OptiScaler](https://github.com/optiscaler/OptiScaler), the mod's DLSS calls become FSR 4. Tested on a Radeon RX 6700S, where OptiScaler uses the driver's FSR 4.1.2 RDNA 2 model.
+- **Planned:** a built-in FSR 4.1 backend using AMD's [FSR SDK 2.4](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) through a DX11→DX12 bridge, so OptiScaler is no longer needed. It would also give FSR the game's real camera parameters.
 
 ## Requirements
 
-- An NVIDIA RTX GPU and a current driver.
-- **NVIDIA's DLSS runtime, `nvngx_dlss.dll` (310.x or newer), in the game folder.** Breakpoint has no DLSS support of its own, so it ships no DLSS DLL and the NVIDIA app has no DLSS override for it. Get the DLL from NVIDIA's official [DLSS SDK](https://github.com/NVIDIA/DLSS) (`lib/Windows_x86_64/rel/nvngx_dlss.dll`).
-- Ghost Recon Breakpoint running on **DirectX 11**. Vulkan is not supported.
-- In the game's graphics settings, **Anti-Aliasing = TAA** with Temporal Injection on. The mod hooks the TAA pass, so it does nothing when TAA is off.
+- An FSR 4 capable AMD GPU (RX 6000 series or newer) and a current Adrenalin driver. FSR 4.1 for RX 6000 needs Adrenalin 26.10.1 or newer.
+- Ghost Recon Breakpoint on **DirectX 11** (`GRB.exe`, not Vulkan). In Steam, choose the DX11 entry when you press Play.
+- In the game's video settings: **Anti-Aliasing on, Temporal Injection on**. The mod hooks the TAA pass, so it does nothing without TAA.
 
-## Install
+## Install (current, with OptiScaler)
 
-1. Download `dinput8.dll` and `GRB_DLSS.ini` from the **[latest release](../../releases/latest)**. Releases are the only tested builds; don't build from the `main` branch to play, because it can contain work in progress and diagnostics.
-2. Copy both into the game folder, next to `GRB.exe`.
-3. Put `nvngx_dlss.dll` (310.x or newer, see Requirements) in the same folder. **This step is required**: without it DLSS can't run and the game keeps its own TAA.
-4. Start the game, set Anti-Aliasing to TAA, and press **Home** for the menu.
+1. Build `dinput8.dll` (see [Build](#build)) and copy it and `config/GRB_DLSS.ini` next to `GRB.exe`.
+2. Install OptiScaler as `winmm.dll` in the same folder. Tested with 0.9.4 and with the v10 nightly of 2026-11-01.
+3. In `OptiScaler.ini`, set:
+   - **0.9.4:** `Dx11Upscaler=fsr31_12`, `UpscalerIndex=0`, `Fsr4ForceEnableInt8=true`
+   - **v10 nightly:** `Dx11Upscaler=ffx_12`
+   - **Both:** `Dxgi=false` (no GPU spoofing needed), and `Fsr4EnableWatermark=true` while you check that it works.
+4. Start the game. The FSR watermark should read `FSR4…` (on RX 6000: `FSR4-i8-2 … Source: Driver`), not `FSR3`. NVIDIA's `nvngx_dlss.dll` is **not** needed.
 
-To uninstall, delete `dinput8.dll`, `GRB_DLSS.ini`, `GRB_DLSS.log` and `nvngx_dlss.dll`.
+In game: **Home** opens the mod's menu (render scale), **End** switches between the upscaler and the game's TAA, **Page Up/Down** change the render scale. On laptops without these keys they are usually Fn + arrow keys. OptiScaler's own menu defaults to **Insert**; set `ShortcutKey` in `OptiScaler.ini` if your keyboard has none.
 
-### Using ReShade together with OptiScaler?
+> Breakpoint is an always-online game. The mod only touches rendering, but use it at your own risk, especially in PvP (Ghost War).
 
-v1.1 can crash at startup when **ReShade and OptiScaler are both installed** ([#1](../../issues/1)). A fix contributed by [@anaCS-26](https://github.com/anaCS-26) ([#2](../../pull/2)) is available as an **experimental build**: download `dinput8.dll` from the **[v1.2-experimental pre-release](../../releases/tag/v1.2-experimental)** (source: the [`experimental`](../../tree/experimental) branch) and use it instead of the v1.1 one.
+## AMD fix
 
-> **Untested by the maintainer.** It has been confirmed working by other users with ReShade + OptiScaler. If you don't use ReShade, stay on the latest release.
+AMD drivers don't implement D3D11 driver command lists, so the d3d11 runtime emulates deferred contexts. Each context gets its own copy of a static per-flavor function table inside `d3d11.dll`. While the runtime batches state changes, it rewrites entries of that copy with "amortized" wrappers (`TID3D11DeviceContext_Draw_Amortized` and so on), which erases per-context vtable hooks. GRB-DLSS therefore saw the TAA shaders being created but never a TAA draw.
 
-
-> Breakpoint is an always-online game. The mod only touches rendering and does not change gameplay, but use it at your own risk, especially in PvP (Ghost War).
-
-## Performance notes
-
-DLSS cost depends on the **output** resolution, not the render resolution. Measured on an RTX 4060 Laptop GPU at 1440p output, compared with the game's TAA:
-
-| Preset | Extra frame time |
-|---|---|
-| F (CNN) | ~1.5–2 ms |
-| K (transformer) | ~2–3 ms |
-| L (transformer, 4.5) | ~4–5 ms |
-
-Preset K is the recommended default. Running DLSS through OptiScaler's DX11→DX12 bridge (`Dx11Upscaler=dlss_12`) adds roughly 20 ms per frame. If you use OptiScaler, set `Dx11Upscaler=dlss`.
-
-## How it works
-
-Breakpoint's renderer (AnvilNext) records the frame on D3D11 **deferred contexts**, so the TAA draw happens on a worker thread long before the GPU executes it. The mod handles this in four parts:
-
-1. **Proxy and hooks.** `dinput8.dll` proxies the system DLL and hooks the D3D11 device and context vtables (`CreatePixelShader`, `PSSetShader`, draws, `Map`/`Unmap`, `FinishCommandList`, `ExecuteCommandList`).
-2. **TAA detection.** The game's `TemporalAA_*` pixel shaders are identified when they are created. Their constant buffers (`cb_g_TemporalAA_Constants`, `cb_g_Pass`, `cb_g_Frame`) are shadowed on `Map`, which gives the mod jitter, sizes, the reprojection and the projection matrices.
-3. **Command-list split.** At the TAA draw, the deferred command list is finished early (`FinishCommandList`). A "resolve" draw that copies the DLSS output into the TAA render target replaces the TAA shader. When the game submits the list with `ExecuteCommandList`, the mod executes the first part, runs a small compute pass to prepare colour, motion vectors and depth in the format NGX expects, evaluates DLSS on the immediate context, and then lets the rest of the frame run.
-4. **Render scale.** `renderscale.cpp` patches the single instruction that stores the dynamic-resolution ratio (plus a secondary store), so the engine renders at the chosen percentage everywhere.
-
-The in-game menu is drawn with D3D11 into the back buffer from a hook on the swap chain's `Present`. The font is a baked DejaVu Sans Mono atlas.
-
-`slcam.cpp` (OptiScaler frame-generation camera data) and `probe.cpp` (memory probe used to find the render-scale global) are optional or developer-only. They are off by default.
+The wrappers always dispatch through the static table, and the copy is refilled from it. So the mod now also hooks the static table each context was built from, and forwards to that table's original entries. See `RtFindTable` in [`src/mod.cpp`](src/mod.cpp).
 
 ## Build
 
-The DLL is cross-built from Linux with clang and lld against the mingw-w64 headers. It has no static CRT and imports only Win32 and `msvcrt.dll`.
-
-For a stable build, check out a release tag first. `main` is the development branch.
-
-```sh
-sudo apt install clang lld mingw-w64          # Debian/Ubuntu
-git checkout v1.1                              # latest release tag
-./build.sh                                     # -> out/dinput8.dll
-# or, with headers/libs elsewhere:
-SYSROOT=/path/to/prefix ./build.sh             # expects $SYSROOT/x86_64-w64-mingw32/include
-```
+Cross-build from Linux with `build.sh` (clang, lld, mingw-w64 headers). Or build natively on Windows from Git Bash with `build-win.sh`, which needs LLVM `clang`/`ld.lld` on `PATH` and MSYS2's mingw-w64 headers (default `SYSROOT=/c/msys64/mingw64`). Output: `out/dinput8.dll`.
 
 ## Configuration
 
-See [`config/GRB_DLSS.ini`](config/GRB_DLSS.ini). Every key is documented inline.
+See [`config/GRB_DLSS.ini`](config/GRB_DLSS.ini). Every key is documented inline. Most changes apply in-game when the file is saved.
 
 ## Credits
 
-- NVIDIA DLSS / NGX. No NVIDIA binaries are included: the NGX core comes from the driver, and `nvngx_dlss.dll` from NVIDIA's DLSS SDK.
-- DejaVu fonts, used for the menu.
-- OptiScaler, for compatibility testing.
+- [GRB-DLSS](https://github.com/umairBinMohammad/grb-dlss) by Umair Bin Mohammad: the TAA replacement, render-scale patch, in-game menu and everything else this builds on.
+- [OptiScaler](https://github.com/optiscaler/OptiScaler), which currently provides the FSR 4 path.
+- AMD FSR / FidelityFX SDK. DejaVu fonts, used for the menu.
 
 ## License
 
