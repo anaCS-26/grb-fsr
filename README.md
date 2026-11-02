@@ -20,7 +20,7 @@ GRB-FSR is based on [GRB-DLSS](https://github.com/umairBinMohammad/grb-dlss) by 
 
 ## Install
 
-1. Copy everything in the release zip (`dinput8.dll`, `GRB_FSR.ini`, AMD's `amd_fidelityfx_loader_dx12.dll` and `amd_fidelityfx_upscaler_dx12.dll`, and AMD's license) next to `GRB.exe`.
+1. Download `GRB-FSR-<version>.zip` from the [latest release](../../releases/latest) and copy everything in it (`dinput8.dll`, `GRB_FSR.ini`, AMD's `amd_fidelityfx_loader_dx12.dll` and `amd_fidelityfx_upscaler_dx12.dll`, and AMD's license) next to `GRB.exe`.
 2. Remove or rename OptiScaler (`winmm.dll`, `dxgi.dll`, ...) if it is installed.
 3. Start the game. The mod's menu (**Home**) shows `FSR 4.1.2` (or `3.1.x` on GPUs without FSR 4), and `GRB_FSR.log` shows `FSR context ... using 4.1.2`.
 
